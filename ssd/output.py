@@ -60,7 +60,8 @@ def _atomic_write(path: Path, content: str) -> None:
         try:
             os.unlink(tmp)
         except OSError:
-            pass
+            import warnings
+            warnings.warn(f"Could not clean up temp file: {tmp}", RuntimeWarning, stacklevel=2)
         raise
 
 

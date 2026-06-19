@@ -1,3 +1,4 @@
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -36,7 +37,6 @@ class Config:
 
 def _filter_fields(dc_class, raw: dict) -> dict:
     """Keep only keys that are valid fields of the dataclass, ignoring unknown TOML keys."""
-    import dataclasses
     valid = {f.name for f in dataclasses.fields(dc_class)}
     return {k: v for k, v in raw.items() if k in valid}
 

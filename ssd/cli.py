@@ -1,4 +1,6 @@
 import glob as _glob
+import os
+import webbrowser
 from pathlib import Path
 from typing import Optional
 
@@ -46,8 +48,8 @@ def token(ctx):
         cookie_path.chmod(0o600)
         click.echo(f"Cookie saved to {cookie_path}", err=True)
     else:
-        click.echo("Warning: could not extract d cookie (Chrome not found or not logged in). "
-                   "API calls may fail for newer Slack versions.", err=True)
+        click.echo("Warning: could not extract d cookie from any source (Slack Cookies file, Firefox, Chrome). "
+                   "Make sure at least one browser is open and signed into Slack, then re-run ssd token.", err=True)
 
 
 def _get_token(ctx_obj: dict) -> str:
@@ -246,5 +248,4 @@ def graph(ctx, channel_dirs, output):
     click.echo(
         f"Graph: {output} — {len(data['nodes'])} users, {len(data['links'])} connections"
     )
-    import webbrowser, os
-    webbrowser.open(f"file://{os.path.abspath(output)}")
+    webbrowser.open(f"file://{str(Path(output).resolve())}")

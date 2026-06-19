@@ -7,97 +7,87 @@ from pathlib import Path
 def build_graph(dirs: list[Path]) -> dict:
     """Build a user interaction graph from one or more channel message dirs.
 
-    Reads both messages.json (full channel dump) and thread_*/thread.json
-    (standalone thread dumps) so no interactions are missed.
+    Reads each messages.json once, buffering (sender, text) pairs for the
+    mention scan which runs after all users are known. Standalone thread dumps
+    under thread_*/thread.json are also collected in the same pass.
     """
     edges: dict[tuple[str, str], int] = defaultdict(int)
     user_messages: dict[str, int] = defaultdict(int)
     user_replies: dict[str, int] = defaultdict(int)
     channels = []
+    # Buffer (sender, text) pairs for mention scan after all users known
+    msg_texts: list[tuple[str, str]] = []
 
     for d in dirs:
-        # --- channel messages ---
+        if not d.is_dir():
+            continue
         msg_file = d / "messages.json"
         if msg_file.exists():
             channels.append(d.name)
-            _process_messages(json.loads(msg_file.read_text()), edges, user_messages, user_replies)
+            messages = json.loads(msg_file.read_text())
+            for msg in messages:
+                sender = msg.get("user_name") or "unknown"
+                if sender != "unknown":
+                    user_messages[sender] += 1
+                    msg_texts.append((sender, msg.get("text", "")))
+                for reply in msg.get("thread", []):
+                    replier = reply.get("user_name") or "unknown"
+                    if replier == "unknown":
+                        continue
+                    user_replies[replier] += 1
+                    if replier != sender:
+                        edges[(replier, sender)] += 1
+                    msg_texts.append((replier, reply.get("text", "")))
 
-        # --- standalone thread dumps (thread_<ts>/thread.json) ---
+        # standalone thread dumps (thread_<ts>/thread.json)
         for thread_dir in d.iterdir():
             if not thread_dir.is_dir() or not thread_dir.name.startswith("thread_"):
                 continue
             tf = thread_dir / "thread.json"
             if not tf.exists():
                 continue
-            replies = json.loads(tf.read_text())
-            for r in replies:
+            for r in json.loads(tf.read_text()):
                 replier = r.get("user_name") or "unknown"
-                if replier == "unknown":
-                    continue
-                user_replies[replier] += 1
+                if replier != "unknown":
+                    user_replies[replier] += 1
+                    msg_texts.append((replier, r.get("text", "")))
 
-    # Resolve mentions now that we know all users
-    all_users = frozenset(user_messages) | frozenset(user_replies)
+    all_users = frozenset(user_messages) | frozenset(user_replies) - {"unknown"}
 
-    # Second pass for mentions (needs known users for multi-word name matching)
-    for d in dirs:
-        msg_file = d / "messages.json"
-        if msg_file.exists():
-            messages = json.loads(msg_file.read_text())
-            for msg in messages:
-                sender = msg.get("user_name") or "unknown"
-                if sender == "unknown":
-                    continue
-                for mentioned in _find_mentions(msg.get("text", ""), all_users, sender):
-                    edges[(sender, mentioned)] += 1
-                for reply in msg.get("thread", []):
-                    replier = reply.get("user_name") or "unknown"
-                    if replier == "unknown":
-                        continue
-                    for mentioned in _find_mentions(reply.get("text", ""), all_users, replier):
-                        edges[(replier, mentioned)] += 1
+    # Mention scan: regex extracts @word candidates, set lookup confirms known user
+    _MENTION_RE = re.compile(r"@(\S+)")
+    for sender, text in msg_texts:
+        if "@" not in text or sender == "unknown":
+            continue
+        for raw in _MENTION_RE.findall(text):
+            for candidate in _mention_candidates(raw):
+                if candidate in all_users and candidate != sender:
+                    edges[(sender, candidate)] += 1
+                    break
 
     nodes = [
         {"id": u, "messages": user_messages[u], "replies": user_replies[u]}
         for u in sorted(all_users)
-        if u != "unknown"
     ]
     links = [
         {"source": src, "target": dst, "value": count}
         for (src, dst), count in edges.items()
-        if src in all_users and dst in all_users and src != "unknown" and dst != "unknown"
+        if src in all_users and dst in all_users
     ]
     return {"nodes": nodes, "links": links, "channels": channels}
 
 
-def _process_messages(
-    messages: list[dict],
-    edges: dict,
-    user_messages: dict,
-    user_replies: dict,
-) -> None:
-    for msg in messages:
-        sender = msg.get("user_name") or "unknown"
-        if sender == "unknown":
-            continue
-        user_messages[sender] += 1
-        for reply in msg.get("thread", []):
-            replier = reply.get("user_name") or "unknown"
-            if replier == "unknown":
-                continue
-            user_replies[replier] += 1
-            if replier != sender:
-                edges[(replier, sender)] += 1
-
-
-def _find_mentions(text: str, known_users: frozenset, self_user: str) -> list[str]:
-    """Find @mentions in already-resolved text by matching against known user names.
-    Handles multi-word display names correctly."""
-    found = []
-    for user in known_users:
-        if user != self_user and user != "unknown" and f"@{user}" in text:
-            found.append(user)
-    return found
+def _mention_candidates(raw: str) -> list[str]:
+    """Strip trailing punctuation from a @mention token to find the real name."""
+    candidates = []
+    s = raw
+    while s:
+        candidates.append(s)
+        if s[-1] in ".,!?:;)\"'":
+            s = s[:-1]
+        else:
+            break
+    return candidates
 
 
 def render_html(graph: dict, title: str = "Communication Graph") -> str:

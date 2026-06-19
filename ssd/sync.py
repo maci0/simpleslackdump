@@ -24,7 +24,7 @@ def _refresh_old_threads(
     refreshed = 0
     for msg in stored:
         # Skip messages at or after the cursor — already enriched in this run
-        if msg["ts"] >= cursor_ts:
+        if float(msg["ts"]) >= float(cursor_ts):
             continue
         thread = msg.get("thread")
         if not thread:
@@ -32,7 +32,7 @@ def _refresh_old_threads(
         latest_reply_ts = max(r["ts"] for r in thread)
         new_raw = api.get_replies(channel_id, msg["ts"], oldest=latest_reply_ts)
         # oldest= is inclusive; skip the reply we already have
-        new_raw = [r for r in new_raw if r["ts"] > latest_reply_ts]
+        new_raw = [r for r in new_raw if float(r["ts"]) > float(latest_reply_ts)]
         if not new_raw:
             continue
         new_enriched = [api.enrich_reply(r) for r in new_raw]  # collect fully before mutating
@@ -75,7 +75,7 @@ def run_sync(
         raw_replies = api.get_replies(channel_id, parsed.thread_ts, oldest=oldest)
         # oldest= is inclusive — filter to strictly newer replies to avoid reprocessing cursor
         if oldest:
-            raw_replies = [r for r in raw_replies if r["ts"] > oldest]
+            raw_replies = [r for r in raw_replies if float(r["ts"]) > float(oldest)]
         if not raw_replies:
             click.echo("  no new replies")
             return
@@ -90,9 +90,9 @@ def run_sync(
         for m in enriched:
             by_ts[m["ts"]] = m
         sorted_msgs = sorted(by_ts.values(), key=lambda m: float(m["ts"]))
-        from ssd.output import format_markdown
-        (thread_dir / "thread.json").write_text(json.dumps(sorted_msgs, indent=2, ensure_ascii=False))
-        (thread_dir / "thread.md").write_text(format_markdown(sorted_msgs))
+        from ssd.output import format_markdown, _atomic_write
+        _atomic_write(thread_dir / "thread.json", json.dumps(sorted_msgs, indent=2, ensure_ascii=False))
+        _atomic_write(thread_dir / "thread.md", format_markdown(sorted_msgs))
         write_cursor(thread_dir, max(m["ts"] for m in enriched))
         click.echo(f"  thread {parsed.thread_ts}: {len(enriched)} new replies")
         return

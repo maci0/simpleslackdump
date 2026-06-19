@@ -52,8 +52,7 @@ def download_attachments(dir: Path, messages: list[dict], token: str) -> list[di
             updated["files"] = [_enrich_file(f, msg["ts"], att_dir, token) for f in msg["files"]]
         if msg.get("thread"):
             updated["thread"] = [
-                {**reply, "files": [_enrich_file(f, reply["ts"], att_dir, token) for f in reply["files"]]}
-                if reply.get("files") else reply
+                {**reply, "files": [_enrich_file(f, reply["ts"], att_dir, token) for f in reply.get("files", [])]}
                 for reply in msg["thread"]
             ]
         result.append(updated)

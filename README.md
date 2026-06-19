@@ -234,8 +234,8 @@ Re-run `ssd token` if commands return `invalid_auth` (e.g. after signing out and
 **`invalid_auth` on every command:**
 Re-run `ssd token`. The session may have expired or the browser may not have been open when credentials were extracted.
 
-**`ssd token` prints "Warning: could not extract d cookie (Chrome not found or not logged in)":**
-Both Firefox and Chrome are tried. Make sure at least one of them is open and signed into the same Slack workspace, then re-run `ssd token`.
+**`ssd token` prints a warning about cookie extraction failing:**
+The actual warning indicates cookie extraction failed from all sources — Slack's own Cookies file, Firefox, and Chrome. Make sure at least one browser is open and signed into the same Slack workspace, then re-run `ssd token`.
 
 **Channel not found when using `ssd dump #name`:**
 Use the channel URL or bare ID instead. Name-based lookup pages through `conversations.list` which may time out on large workspaces.
