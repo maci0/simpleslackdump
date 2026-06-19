@@ -19,7 +19,7 @@ def download_attachments(dir: Path, messages: list[dict], token: str) -> list[di
             if not url:
                 enriched_files.append({"name": name, "url": "", "local_path": "", "mimetype": f.get("mimetype", ""), "size": 0})
                 continue
-            ts_prefix = msg["ts"].replace(".", "_").split("_")[0]
+            ts_prefix = msg["ts"].replace(".", "_")
             filename = f"{ts_prefix}_{name}"
             dest = att_dir / filename
             size = f.get("size")  # None if Slack omits the field

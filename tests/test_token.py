@@ -18,11 +18,15 @@ def _make_cookies_db(path: Path, value: str) -> None:
     conn.close()
 
 
-def test_extract_from_cookies_sqlite(tmp_path, monkeypatch):
+def test_extract_cookie_from_slack_cookies_sqlite(tmp_path, monkeypatch):
+    """_from_slack_cookies provides the xoxd- cookie, not the xoxc- token."""
+    from ssd.token import extract_cookie
     db = tmp_path / "Cookies"
     _make_cookies_db(db, "xoxd-test-token-abc123")
     monkeypatch.setattr(token_mod, "COOKIES_PATH", db)
-    assert extract_token() == "xoxd-test-token-abc123"
+    # patch Chrome path to non-existent so it falls through to Slack cookies
+    monkeypatch.setattr(token_mod, "_chrome_d_cookie", lambda: None)
+    assert extract_cookie() == "xoxd-test-token-abc123"
 
 
 def test_extract_skips_empty_value(tmp_path, monkeypatch):

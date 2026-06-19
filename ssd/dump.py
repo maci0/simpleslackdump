@@ -18,6 +18,9 @@ def run_dump(api: SlackAPI, workspace: str, target: str, output_root: str, token
         t0 = time.monotonic()
         raw_replies = api.get_replies(channel_id, parsed.thread_ts)
         enriched = api.enrich(channel_id, raw_replies)
+        if attachments_enabled and token:
+            from ssd.attachments import download_attachments
+            enriched = download_attachments(thread_dir, enriched, token)
         sorted_msgs = sorted(enriched, key=lambda m: float(m["ts"]))
         thread_dir.mkdir(parents=True, exist_ok=True)
         (thread_dir / "thread.json").write_text(json.dumps(sorted_msgs, indent=2, ensure_ascii=False))

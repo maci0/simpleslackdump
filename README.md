@@ -1,34 +1,37 @@
 # ssd — simpleslackdump
 
-Dump Slack channels and threads to JSON and Markdown. macOS only. Extracts auth tokens directly from the running Slack desktop app — no OAuth setup, no bot token, no Slack app to configure.
+Dump Slack channels and threads to JSON and Markdown. No OAuth setup. No bot token. No Slack app to register. Extracts credentials directly from the running Slack desktop app and Chrome browser.
 
-## Features
+## What it does
 
-- Full channel dump or incremental sync with cursor-based deduplication
-- Threads and replies fully captured and merged
+- Full channel dump or incremental sync (cursor-based, deduplicating)
+- Threads and replies captured in full, merged correctly on re-sync
 - `@user` mentions resolved to display names
-- JSON (structured, all metadata) + Markdown (human-readable) output per channel
-- Optional file attachment download with skip-existing
-- Config file (`ssd.toml`) for tracking channels across `ssd update` runs
-- Enterprise Grid workspaces supported
+- JSON (all metadata) + Markdown (readable) output per channel
+- File attachment download with skip-already-downloaded
+- `ssd.toml` config to track multiple channels and sync them with one command
+- Works with Enterprise Grid workspaces
 
 ## Requirements
 
-- macOS (token extraction reads macOS Slack desktop app + Chrome cookie store)
-- [Slack desktop app](https://slack.com/downloads/mac) installed and signed in
-- [Google Chrome](https://www.google.com/chrome/) installed and signed into the same Slack workspace
-- Python 3.11+ and [uv](https://docs.astral.sh/uv/)
+| Requirement | Why |
+|---|---|
+| macOS | Token extraction reads Slack's local app data |
+| [Slack desktop app](https://slack.com/downloads/mac), signed in | Source of the `xoxc-` API token |
+| [Google Chrome](https://www.google.com/chrome/), signed into Slack | Source of the session cookie (`xoxd-`) |
+| Python 3.11+ | Runtime |
+| [uv](https://docs.astral.sh/uv/) | Dependency/tool management |
+
+Chrome must be signed into the **same workspace** as the desktop app.
 
 ## Install
-
-**As a tool (recommended):**
 
 ```bash
 uv tool install git+https://github.com/maci0/simpleslackdump
 ssd --help
 ```
 
-**Or clone and run locally:**
+Or to hack on it:
 
 ```bash
 git clone https://github.com/maci0/simpleslackdump
@@ -40,26 +43,26 @@ uv run ssd --help
 ## Quick start
 
 ```bash
-# 1. Extract credentials from running Slack desktop app + Chrome cookies
+# Step 1 — extract credentials (run once, re-run if you get invalid_auth)
 ssd token
 
-# 2. Dump a channel — paste the URL directly from Slack
+# Step 2 — dump a channel (paste the Slack URL directly)
 ssd dump https://yourworkspace.slack.com/archives/C0XXXXXXXXX
 
-# 3. Or use channel name or bare ID
+# Also works with channel name or bare ID
 ssd dump "#general"
 ssd dump C0XXXXXXXXX
 ```
 
-Output lands in `./output/<workspace>/<channel_name>_<channel_id>/`:
+Output in `./output/<workspace>/<channel_name>_<channel_id>/`:
 
 ```
-messages.json     # all messages, threads, metadata — sorted by timestamp
-messages.md       # human-readable, @mentions resolved
-.cursor           # tracks last synced timestamp for incremental sync
+messages.json     # structured — all messages, threads, reactions, file metadata
+messages.md       # readable — @mentions resolved to names, timestamps in UTC
+.cursor           # last synced timestamp — used by ssd sync
 ```
 
-Example output:
+Progress output:
 
 ```
 #general (C0XXXXXXXXX) -> output/myworkspace/general_C0XXXXXXXXX
@@ -70,43 +73,39 @@ fetched 879 messages in 7.3s (120 msg/s)
 ## Incremental sync
 
 ```bash
-# Sync new messages since last run (reads .cursor file)
+# Fetch only messages since last run
 ssd sync https://yourworkspace.slack.com/archives/C0XXXXXXXXX
 
-# Sync from a specific date forward
+# Fetch from a specific date
 ssd sync "#general" --since 2024-06-01
 
-# Also accepts a Unix timestamp
+# Unix timestamp also works
 ssd sync "#general" --since 1717200000
 ```
 
-New messages are merged into the existing `messages.json` — no duplicates, no data loss.
+New messages merge into existing `messages.json` — no duplicates, no overwrites.
 
-## Config-driven sync
-
-Track channels in `ssd.toml` and sync them all with one command:
+## Track channels with ssd.toml
 
 ```bash
-# Add channels to track
+# Add a channel
 ssd add https://yourworkspace.slack.com/archives/C0XXXXXXXXX
-ssd add "#engineering"
 
-# Add a single thread (dumps only that thread's replies)
+# Add a thread (syncs only replies in that thread)
 ssd add "https://yourworkspace.slack.com/archives/C0XXXXXXXXX/p1234567890123456"
 
-# Show tracked channels and last sync time
+# Show tracked channels and when they were last synced
 ssd list
 
-# Sync everything in ssd.toml
+# Sync all tracked channels in one shot
 ssd update
 ```
 
-`ssd.toml` (auto-created and updated by `ssd add`):
+`ssd.toml` (auto-managed by `ssd add` / `ssd remove`):
 
 ```toml
 [settings]
-output_dir = "./output"
-attachments = false
+attachments = false     # set to true to download files by default
 
 [[channels]]
 id = "C0XXXXXXXXX"
@@ -117,75 +116,83 @@ url = "https://yourworkspace.slack.com/archives/C0XXXXXXXXX"
 id = "C0YYYYYYYYY"
 name = "engineering"
 url = "https://yourworkspace.slack.com/archives/C0YYYYYYYYY"
-since = "2024-01-01"   # only sync messages after this date
+since = "2024-01-01"   # never fetch messages older than this
+```
+
+Remove a channel:
+
+```bash
+ssd remove C0XXXXXXXXX
+ssd remove "#general"
+ssd remove https://yourworkspace.slack.com/archives/C0XXXXXXXXX
 ```
 
 ## Attachments
 
-```bash
-# Download file attachments (pass flag before the subcommand)
-ssd --attachments dump "#general"
-ssd --attachments update
+Files are not downloaded by default. Enable with `--attachments` (before the subcommand) or in `ssd.toml`:
 
-# Enable by default in ssd.toml
-[settings]
-attachments = true
+```bash
+ssd --attachments dump "#general"
+ssd --attachments sync "#engineering"
+ssd --attachments update
 ```
 
-Files saved to `<channel_dir>/attachments/<timestamp>_<filename>`. Already-downloaded files are skipped. Markdown output links to local paths.
+Files land in `<channel_dir>/attachments/`. Already-downloaded files are skipped (checked by name and size). Markdown output links to the local path.
 
-Per-channel override:
+Per-channel override in `ssd.toml`:
 
 ```toml
 [[channels]]
 id = "C0XXXXXXXXX"
 name = "general"
-attachments = false   # override global setting for this channel
+attachments = false    # disable for this channel even if global is true
 ```
 
-## Thread-only dump
+## Thread dump
 
-Pass a thread URL to dump just that thread's replies:
+Paste a thread URL to dump only that thread's replies:
 
 ```bash
 ssd dump "https://yourworkspace.slack.com/archives/C0XXXXXXXXX/p1234567890123456"
 ```
 
-Output goes to `<channel_dir>/thread_<ts>/thread.json` and `thread.md`. Incremental sync works the same way — only new replies are fetched and merged.
+Output in `<channel_dir>/thread_<ts>/thread.json` and `thread.md`. `ssd sync` on a thread URL fetches only new replies and merges them.
 
-## Global options
+## All options
 
-All options must appear before the subcommand:
+Options go **before** the subcommand:
 
 ```
-ssd [OPTIONS] COMMAND
+ssd [OPTIONS] COMMAND [ARGS]
 
 Options:
-  --token TEXT          Override auto-extracted token (or set SSD_TOKEN env var)
-  --output DIR          Output directory (default: ./output)
-  --config FILE         Config file (default: ./ssd.toml)
-  --delay FLOAT         Seconds between paginated API calls (default: 1.0)
+  --token TEXT                  Override auto-extracted token (or SSD_TOKEN env var)
+  --output DIR                  Output directory (default: ./output)
+  --config FILE                 Config file (default: ./ssd.toml)
+  --delay FLOAT                 Seconds between paginated API calls (default: 1.0)
   --attachments / --no-attachments
+
+Commands:
+  token     Extract credentials from Slack desktop app and Chrome
+  dump      Full history dump of one or more channels/threads
+  sync      Incremental sync — fetch only new messages since last run
+  add       Add a channel or thread to ssd.toml
+  remove    Remove a channel or thread from ssd.toml
+  list      Show tracked channels and last sync time
+  update    Sync all channels tracked in ssd.toml
 ```
 
-## How authentication works
+## How auth works
 
-`ssd token` extracts credentials from your local machine:
+`ssd token` runs once to save credentials locally:
 
-1. **`xoxc-` token** — read from Slack's LevelDB local storage at `~/Library/Application Support/Slack/Local Storage/leveldb/`
-2. **`d` cookie** — decrypted from Chrome's SQLite cookie database using the Chrome Safe Storage key from macOS Keychain
+1. Finds the `xoxc-` token in Slack's LevelDB (`~/Library/Application Support/Slack/Local Storage/leveldb/`)
+2. Decrypts the `d` session cookie from Chrome's SQLite cookie store (using the `Chrome Safe Storage` key from macOS Keychain)
+3. Saves both to `output/.token` and `output/.cookie` (permissions `600`)
 
-Both are required for the Slack Web API. Newer Slack (Electron-based) sends `Authorization: Bearer xoxc-...` and `Cookie: d=xoxd-...` on every request.
+Every API call sends `Authorization: Bearer xoxc-...` and `Cookie: d=xoxd-...`. This is how the Slack Electron desktop app itself authenticates — no API keys needed.
 
-Credentials are saved to `output/.token` and `output/.cookie` (mode `600`). Re-run `ssd token` if API calls start returning `invalid_auth`.
-
-## Removing a tracked channel
-
-```bash
-ssd remove C0XXXXXXXXX
-# or
-ssd remove "https://yourworkspace.slack.com/archives/C0XXXXXXXXX"
-```
+Re-run `ssd token` if commands return `invalid_auth` (e.g. after signing out and back in).
 
 ## Development
 
@@ -194,4 +201,5 @@ git clone https://github.com/maci0/simpleslackdump
 cd simpleslackdump
 uv sync --group dev
 uv run pytest
+uv run ssd --help
 ```

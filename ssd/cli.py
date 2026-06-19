@@ -157,8 +157,23 @@ def remove(ctx, target):
     from ssd.parser import parse_target
     from ssd.config import remove_entry
 
+    from ssd.config import load_config
     parsed = parse_target(target)
-    channel_id = parsed.channel_id or parsed.channel_name
+    channel_id = parsed.channel_id
+    if not channel_id and parsed.channel_name:
+        # Resolve name to ID from the config — avoids API call
+        cfg = load_config(Path(ctx.obj["config_path"]))
+        name = parsed.channel_name.lstrip("#")
+        for ch in cfg.channels:
+            if ch.name == name:
+                channel_id = ch.id
+                break
+        for th in cfg.threads:
+            if not channel_id:
+                break
+        if not channel_id:
+            click.echo(f"Not found: {parsed.channel_name}", err=True)
+            return
     removed = remove_entry(Path(ctx.obj["config_path"]), channel_id, thread_ts=parsed.thread_ts)
     if removed:
         click.echo(f"Removed {channel_id}")

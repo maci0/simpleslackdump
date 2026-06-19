@@ -120,8 +120,12 @@ def _chrome_d_cookie() -> Optional[str]:
 
 
 def extract_token() -> str:
-    """Return the xoxc- client token from the Slack desktop app's LevelDB."""
-    for method in (_from_slack_cookies, _from_leveldb, _from_raw_scan):
+    """Return the xoxc- client token from the Slack desktop app's LevelDB.
+
+    _from_slack_cookies is NOT included here: it returns xoxd- (a session cookie),
+    not the xoxc- bearer token. xoxd- is handled by extract_cookie().
+    """
+    for method in (_from_leveldb, _from_raw_scan):
         result = method()
         if result:
             return result
@@ -137,7 +141,11 @@ def extract_cookie() -> Optional[str]:
       Authorization: Bearer xoxc-...
       Cookie: d=<xoxd-...URL-encoded>
 
-    This tries Chrome's cookie store first since Chrome's encryption is accessible.
-    Returns the plaintext xoxd- value (with raw / and + chars), or None if unavailable.
+    Tries the Slack app's own SQLite Cookies file first (older Slack with plaintext
+    cookies), then falls back to Chrome's encrypted cookie store.
     """
+    # Older Slack stores the d cookie in plaintext in its own Cookies SQLite file
+    slack_cookie = _from_slack_cookies()
+    if slack_cookie:
+        return slack_cookie
     return _chrome_d_cookie()

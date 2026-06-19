@@ -35,8 +35,8 @@ def run_sync(
         out_dir = channel_dir(output_root, workspace, channel_name, channel_id)
         thread_dir = out_dir / f"thread_{parsed.thread_ts.replace('.', '_')}"
         thread_dir.mkdir(parents=True, exist_ok=True)  # single mkdir
-        cursor = None if since else read_cursor(thread_dir)
-        raw_replies = api.get_replies(channel_id, parsed.thread_ts, oldest=cursor)
+        oldest = _since_to_ts(since) if since else read_cursor(thread_dir)
+        raw_replies = api.get_replies(channel_id, parsed.thread_ts, oldest=oldest)
         if not raw_replies:
             click.echo("  no new replies")
             return
