@@ -155,9 +155,7 @@ def add(ctx, target):
 def remove(ctx, target):
     """Remove channel/thread from ssd.toml."""
     from ssd.parser import parse_target
-    from ssd.config import remove_entry
-
-    from ssd.config import load_config
+    from ssd.config import load_config, remove_entry
     parsed = parse_target(target)
     channel_id = parsed.channel_id
     if not channel_id and parsed.channel_name:
@@ -167,9 +165,6 @@ def remove(ctx, target):
         for ch in cfg.channels:
             if ch.name == name:
                 channel_id = ch.id
-                break
-        for th in cfg.threads:
-            if not channel_id:
                 break
         if not channel_id:
             click.echo(f"Not found: {parsed.channel_name}", err=True)

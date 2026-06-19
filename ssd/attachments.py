@@ -23,7 +23,9 @@ def download_attachments(dir: Path, messages: list[dict], token: str) -> list[di
             filename = f"{ts_prefix}_{name}"
             dest = att_dir / filename
             size = f.get("size")  # None if Slack omits the field
-            if dest.exists() and (size is None or dest.stat().st_size == size):
+            # Only skip re-download when size is known and matches — avoids
+            # treating corrupt partial downloads (interrupted run) as complete.
+            if dest.exists() and size is not None and dest.stat().st_size == size:
                 local_path = str(dest)
             else:
                 resp = requests.get(
@@ -37,7 +39,7 @@ def download_attachments(dir: Path, messages: list[dict], token: str) -> list[di
                             fh.write(chunk)
                     local_path = str(dest)
                 else:
-                    local_path = url
+                    local_path = ""  # download failed; url field still has the original URL
             enriched_files.append(
                 {
                     "name": name,

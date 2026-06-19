@@ -25,14 +25,15 @@ def format_markdown(messages: list[dict]) -> str:
         for r in msg.get("reactions", []):
             lines.append(f":{r['name']}: x{r['count']}")
         for f in msg.get("files", []):
-            local = f.get("local_path") or f.get("url") or ""
-            name = f.get("name") or local or "file"
-            if local:
-                rel = Path(local).name
-                if rel:
-                    lines.append(f"[{name}](attachments/{rel})")
-                else:
-                    lines.append(f"[{name}]({local})")
+            name = f.get("name") or "file"
+            local_path = f.get("local_path") or ""
+            url = f.get("url") or ""
+            if local_path:
+                # successfully downloaded — link to local file
+                lines.append(f"[{name}](attachments/{Path(local_path).name})")
+            elif url:
+                # not downloaded (external, deleted, or failed) — link to original
+                lines.append(f"[{name}]({url})")
         for reply in msg.get("thread", []):
             rdt = _ts_to_dt(reply["ts"])
             lines.append(

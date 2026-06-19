@@ -137,7 +137,7 @@ ssd --attachments sync "#engineering"
 ssd --attachments update
 ```
 
-Files land in `<channel_dir>/attachments/`. Already-downloaded files are skipped (checked by name and size). Markdown output links to the local path.
+Files land in `<channel_dir>/attachments/`. Files are skipped on re-run when the local file size matches the size reported by Slack. Markdown links point to the local file; if a download failed, the link points to the original Slack URL instead.
 
 Per-channel override in `ssd.toml`:
 
@@ -193,6 +193,28 @@ Commands:
 Every API call sends `Authorization: Bearer xoxc-...` and `Cookie: d=xoxd-...`. This is how the Slack Electron desktop app itself authenticates — no API keys needed.
 
 Re-run `ssd token` if commands return `invalid_auth` (e.g. after signing out and back in).
+
+## Known limitations
+
+- **Replies to old messages are not picked up by incremental sync.** `ssd sync` uses `conversations.history` with an `oldest=` cursor, which only returns top-level messages. If someone replies to a message from before the cursor, that reply is invisible to sync. Run a full `ssd dump` periodically to catch these, or re-dump individual threads with `ssd dump <thread_url>`.
+
+- **Chrome must be running and signed into Slack** for cookie extraction to work. If Chrome is not present, `ssd token` will save the `xoxc-` token but no cookie — API calls will fail with `invalid_auth` on newer Slack.
+
+- **macOS only.** Token and cookie extraction reads macOS-specific paths (`~/Library/Application Support/Slack/` and `~/Library/Application Support/Google/Chrome/`).
+
+## Troubleshooting
+
+**`invalid_auth` on every command:**
+Re-run `ssd token`. The session may have expired or Chrome may not have been open when credentials were extracted.
+
+**`ssd token` prints "Warning: could not extract d cookie":**
+Make sure Chrome is open and signed into the same Slack workspace. Then re-run `ssd token`.
+
+**Channel not found when using `ssd dump #name`:**
+Use the channel URL or bare ID instead. Name-based lookup pages through `conversations.list` which may time out on large workspaces.
+
+**Attachments show as URL links instead of local file links in Markdown:**
+The download failed (likely a permissions issue or the file was deleted from Slack). Re-run with `--attachments` to retry.
 
 ## Development
 
