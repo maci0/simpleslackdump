@@ -5,7 +5,7 @@ from ssd.parser import parse_target
 from ssd.output import channel_dir, write_messages, write_cursor
 
 
-def run_dump(api: SlackAPI, workspace: str, target: str, output_root: str) -> None:
+def run_dump(api: SlackAPI, workspace: str, target: str, output_root: str, token: str = None, attachments_enabled: bool = False) -> None:
     parsed = parse_target(target)
 
     if parsed.thread_ts:
@@ -33,6 +33,9 @@ def run_dump(api: SlackAPI, workspace: str, target: str, output_root: str) -> No
 
     raw_msgs = api.get_messages(channel_id)
     enriched = api.enrich(channel_id, raw_msgs)
+    if attachments_enabled:
+        from ssd.attachments import download_attachments
+        enriched = download_attachments(out_dir, enriched, token)
     write_messages(out_dir, enriched)
     if enriched:
         write_cursor(out_dir, max(m["ts"] for m in enriched))

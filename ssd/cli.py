@@ -55,11 +55,13 @@ def dump(ctx, targets, delay):
     """Full history dump of channel(s)."""
     from ssd.dump import run_dump
 
-    api = SlackAPI(_get_token(ctx.obj), delay=delay)
+    token = _get_token(ctx.obj)
+    api = SlackAPI(token, delay=delay)
     workspace = api.get_workspace()
+    attach = ctx.obj["attachments"] or False
     for target in targets:
         click.echo(f"Dumping {target}...")
-        run_dump(api, workspace, target, ctx.obj["output"])
+        run_dump(api, workspace, target, ctx.obj["output"], token=token, attachments_enabled=attach)
 
 
 @main.command()
@@ -69,11 +71,13 @@ def dump(ctx, targets, delay):
 @click.pass_context
 def sync(ctx, targets, since, delay):
     """Incremental sync of channel(s)."""
-    api = SlackAPI(_get_token(ctx.obj), delay=delay)
+    token = _get_token(ctx.obj)
+    api = SlackAPI(token, delay=delay)
     workspace = api.get_workspace()
+    attach = ctx.obj["attachments"] or False
     for target in targets:
         click.echo(f"Syncing {target}...")
-        run_sync(api, workspace, target, ctx.obj["output"], since=since)
+        run_sync(api, workspace, target, ctx.obj["output"], since=since, token=token, attachments_enabled=attach)
 
 
 @main.command()
@@ -159,11 +163,13 @@ def update(ctx, delay):
     if not cfg.channels and not cfg.threads:
         click.echo("Nothing tracked. Use: ssd add <url>")
         return
-    api = SlackAPI(_get_token(ctx.obj), delay=delay)
+    token = _get_token(ctx.obj)
+    api = SlackAPI(token, delay=delay)
     workspace = api.get_workspace()
+    attach = ctx.obj["attachments"] or False
     for ch in cfg.channels:
         click.echo(f"Syncing #{ch.name}...")
-        run_sync(api, workspace, ch.id, ctx.obj["output"], since=ch.since)
+        run_sync(api, workspace, ch.id, ctx.obj["output"], since=ch.since, token=token, attachments_enabled=attach)
     for th in cfg.threads:
         click.echo(f"Syncing thread {th.thread_ts}...")
-        run_sync(api, workspace, th.url, ctx.obj["output"], since=None)
+        run_sync(api, workspace, th.url, ctx.obj["output"], since=None, token=token, attachments_enabled=attach)

@@ -19,6 +19,8 @@ def run_sync(
     target: str,
     output_root: str,
     since: Optional[str],
+    token: str = None,
+    attachments_enabled: bool = False,
 ) -> None:
     parsed = parse_target(target)
 
@@ -43,6 +45,9 @@ def run_sync(
         return
 
     enriched = api.enrich(channel_id, raw_msgs)
+    if attachments_enabled:
+        from ssd.attachments import download_attachments
+        enriched = download_attachments(out_dir, enriched, token)
     merge_messages(out_dir, enriched)
     latest = max(m["ts"] for m in enriched)
     write_cursor(out_dir, latest)
