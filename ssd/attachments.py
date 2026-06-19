@@ -13,14 +13,19 @@ def download_attachments(dir: Path, messages: list[dict], token: str) -> list[di
         att_dir.mkdir(parents=True, exist_ok=True)
         enriched_files = []
         for f in files:
+            # skip external/deleted files with no downloadable URL
+            url = f.get("url_private_download") or f.get("url_private")
+            name = f.get("name") or f.get("title") or f.get("id", "unknown")
+            if not url:
+                enriched_files.append({"name": name, "url": "", "local_path": "", "mimetype": f.get("mimetype", ""), "size": 0})
+                continue
             ts_prefix = msg["ts"].replace(".", "_").split("_")[0]
-            filename = f"{ts_prefix}_{f['name']}"
+            filename = f"{ts_prefix}_{name}"
             dest = att_dir / filename
             size = f.get("size", 0)
             if dest.exists() and dest.stat().st_size == size:
                 local_path = str(dest)
             else:
-                url = f["url_private_download"]
                 resp = requests.get(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
@@ -32,11 +37,11 @@ def download_attachments(dir: Path, messages: list[dict], token: str) -> list[di
                             fh.write(chunk)
                     local_path = str(dest)
                 else:
-                    local_path = url  # fallback to original URL
+                    local_path = url
             enriched_files.append(
                 {
-                    "name": f["name"],
-                    "url": f["url_private_download"],
+                    "name": name,
+                    "url": url,
                     "local_path": local_path,
                     "mimetype": f.get("mimetype", ""),
                     "size": size,

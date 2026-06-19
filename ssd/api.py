@@ -120,6 +120,7 @@ class SlackAPI:
                     {"name": r["name"], "count": r["count"], "users": r.get("users", [])}
                     for r in msg.get("reactions", [])
                 ],
+                "files": msg.get("files", []),
                 "thread": [],
             }
             if msg.get("reply_count", 0) > 0:
@@ -136,6 +137,7 @@ class SlackAPI:
                             {"name": rx["name"], "count": rx["count"], "users": rx.get("users", [])}
                             for rx in r.get("reactions", [])
                         ],
+                        "files": r.get("files", []),
                     }
                     for r in raw_replies
                 ]

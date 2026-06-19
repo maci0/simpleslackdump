@@ -49,6 +49,8 @@ def run_dump(api: SlackAPI, workspace: str, target: str, output_root: str, token
 
     if attachments_enabled:
         from ssd.attachments import download_attachments
+        files_count = sum(len(m.get("files", [])) for m in enriched)
+        click.echo(f"  downloading {files_count} attachments...")
         enriched = download_attachments(out_dir, enriched, token)
 
     write_messages(out_dir, enriched)
