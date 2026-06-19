@@ -34,23 +34,28 @@ def run_sync(
         _, channel_name = api.resolve_channel(channel_id)
         out_dir = channel_dir(output_root, workspace, channel_name, channel_id)
         thread_dir = out_dir / f"thread_{parsed.thread_ts.replace('.', '_')}"
-        thread_dir.mkdir(parents=True, exist_ok=True)
+        thread_dir.mkdir(parents=True, exist_ok=True)  # single mkdir
         cursor = None if since else read_cursor(thread_dir)
         raw_replies = api.get_replies(channel_id, parsed.thread_ts, oldest=cursor)
         if not raw_replies:
             click.echo("  no new replies")
             return
         enriched = api.enrich(channel_id, raw_replies)
-        sorted_msgs = sorted(enriched, key=lambda m: float(m["ts"]))
-        thread_dir.mkdir(parents=True, exist_ok=True)
-        (thread_dir / "thread.json").write_text(json.dumps(sorted_msgs, indent=2, ensure_ascii=False))
-        from ssd.output import format_markdown
-        (thread_dir / "thread.md").write_text(format_markdown(sorted_msgs))
-        write_cursor(thread_dir, max(m["ts"] for m in enriched))
-        click.echo(f"  thread {parsed.thread_ts}: {len(enriched)} replies")
         if attachments_enabled and token:
             from ssd.attachments import download_attachments
-            download_attachments(thread_dir, enriched, token)
+            enriched = download_attachments(thread_dir, enriched, token)
+        # load existing thread replies and merge by ts (incremental sync)
+        existing_path = thread_dir / "thread.json"
+        existing: list[dict] = json.loads(existing_path.read_text()) if existing_path.exists() else []
+        by_ts = {m["ts"]: m for m in existing}
+        for m in enriched:
+            by_ts[m["ts"]] = m
+        sorted_msgs = sorted(by_ts.values(), key=lambda m: float(m["ts"]))
+        from ssd.output import format_markdown
+        (thread_dir / "thread.json").write_text(json.dumps(sorted_msgs, indent=2, ensure_ascii=False))
+        (thread_dir / "thread.md").write_text(format_markdown(sorted_msgs))
+        write_cursor(thread_dir, max(m["ts"] for m in enriched))
+        click.echo(f"  thread {parsed.thread_ts}: {len(enriched)} new replies")
         return
 
     if parsed.channel_id:
@@ -74,7 +79,7 @@ def run_sync(
         return
 
     enriched = api.enrich(channel_id, raw_msgs)
-    if attachments_enabled:
+    if attachments_enabled and token:
         from ssd.attachments import download_attachments
         enriched = download_attachments(out_dir, enriched, token)
     merge_messages(out_dir, enriched)

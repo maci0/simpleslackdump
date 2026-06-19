@@ -178,7 +178,9 @@ def list_cmd(ctx):
         click.echo("No channels tracked. Use: ssd add <url>")
         return
     for ch in cfg.channels:
-        matches = list(Path(ctx.obj["output"]).glob(f"*/{ch.name}_{ch.id}"))
+        import glob as _glob
+        pattern = f"*/{_glob.escape(ch.name)}_{_glob.escape(ch.id)}"
+        matches = list(Path(ctx.obj["output"]).glob(pattern))
         cursor = read_cursor(matches[0]) if matches else None
         click.echo(f"  #{ch.name} ({ch.id})  last={cursor or 'never'}")
     for th in cfg.threads:

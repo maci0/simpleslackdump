@@ -34,17 +34,24 @@ class Config:
     threads: list[ThreadEntry] = field(default_factory=list)
 
 
+def _filter_fields(dc_class, raw: dict) -> dict:
+    """Keep only keys that are valid fields of the dataclass, ignoring unknown TOML keys."""
+    import dataclasses
+    valid = {f.name for f in dataclasses.fields(dc_class)}
+    return {k: v for k, v in raw.items() if k in valid}
+
+
 def load_config(path: Path) -> Config:
     if not path.exists():
         return Config()
     doc = tomlkit.loads(path.read_text())
-    settings = Settings(**{k: v for k, v in doc.get("settings", {}).items()})
+    settings = Settings(**_filter_fields(Settings, doc.get("settings", {})))
     channels = [
-        ChannelEntry(**{k: v for k, v in ch.items()})
+        ChannelEntry(**_filter_fields(ChannelEntry, dict(ch)))
         for ch in doc.get("channels", [])
     ]
     threads = [
-        ThreadEntry(**{k: v for k, v in t.items()})
+        ThreadEntry(**_filter_fields(ThreadEntry, dict(t)))
         for t in doc.get("threads", [])
     ]
     return Config(settings=settings, channels=channels, threads=threads)

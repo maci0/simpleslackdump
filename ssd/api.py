@@ -1,7 +1,7 @@
 import re
 import time
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from slack_sdk import WebClient
 
 
@@ -31,7 +31,6 @@ class SlackAPI:
         if not domain:
             url = resp.get("url", "")
             # https://acme.enterprise.slack.com/ -> acme.enterprise
-            from urllib.parse import urlparse
             host = urlparse(url).hostname or ""
             domain = host.replace(".slack.com", "") if host.endswith(".slack.com") else host
         return domain
@@ -83,9 +82,11 @@ class SlackAPI:
             if cursor:
                 kwargs["cursor"] = cursor
             resp = self.client.conversations_replies(**kwargs)
-            # first page: skip index 0 (root message); subsequent pages include all
             batch = resp["messages"]
-            replies.extend(batch[1:] if cursor is None else batch)
+            # Skip the root message (ts == thread_ts) wherever it appears in the batch.
+            # Using cursor is None as a proxy is wrong when oldest > root_ts — the root
+            # won't be returned at all in that case, but batch[0] is a real reply.
+            replies.extend(m for m in batch if m.get("ts") != thread_ts)
             if not resp.get("has_more"):
                 break
             cursor = resp["response_metadata"]["next_cursor"]

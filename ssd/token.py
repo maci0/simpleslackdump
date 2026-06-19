@@ -106,7 +106,8 @@ def _chrome_d_cookie() -> Optional[str]:
 
         key = hashlib.pbkdf2_hmac("sha1", key_raw, b"saltysalt", 1003, 16)
         cipher = Cipher(algorithms.AES(key), modes.CBC(b" " * 16), backend=default_backend())
-        padded = cipher.decryptor().update(enc[3:]) + cipher.decryptor().finalize()
+        dec = cipher.decryptor()
+        padded = dec.update(enc[3:]) + dec.finalize()
         pad_len = padded[-1]
         plain = padded[:-pad_len] if 1 <= pad_len <= 16 else padded
 
