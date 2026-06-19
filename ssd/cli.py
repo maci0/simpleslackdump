@@ -21,7 +21,15 @@ def main(ctx, token, output, config_path, attachments, delay):
 @click.pass_context
 def token(ctx):
     """Extract Slack token from macOS desktop app."""
-    click.echo("token: not yet implemented")
+    from ssd.token import extract_token
+    from pathlib import Path
+
+    tok = extract_token()
+    click.echo(tok)
+    token_path = Path(ctx.obj["output"]) / ".token"
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text(tok)
+    click.echo(f"Token saved to {token_path}", err=True)
 
 
 @main.command()
@@ -30,7 +38,26 @@ def token(ctx):
 @click.pass_context
 def dump(ctx, targets, delay):
     """Full history dump of channel(s)."""
-    click.echo("dump: not yet implemented")
+    from ssd.token import extract_token
+    from ssd.api import SlackAPI
+    from ssd.dump import run_dump
+
+    token = ctx.obj["token"] or _load_token(ctx.obj["output"])
+    if not token:
+        token = extract_token()
+    api = SlackAPI(token, delay=delay)
+    workspace = api.get_workspace()
+    for target in targets:
+        click.echo(f"Dumping {target}...")
+        run_dump(api, workspace, target, ctx.obj["output"])
+
+
+def _load_token(output_root: str) -> str | None:
+    from pathlib import Path
+    p = Path(output_root) / ".token"
+    if p.exists():
+        return p.read_text().strip()
+    return None
 
 
 @main.command()
