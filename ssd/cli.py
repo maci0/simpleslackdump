@@ -33,6 +33,7 @@ def token(ctx):
     token_path = Path(ctx.obj["output"]) / ".token"
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(tok)
+    token_path.chmod(0o600)
     click.echo(f"Token saved to {token_path}", err=True)
 
 
@@ -49,16 +50,21 @@ def _get_token(ctx_obj: dict) -> str:
 
 @main.command()
 @click.argument("targets", nargs=-1, required=True)
-@click.option("--delay", default=1.0, show_default=True)
+@click.option("--delay", default=None, show_default=True, type=float)
 @click.pass_context
 def dump(ctx, targets, delay):
     """Full history dump of channel(s)."""
     from ssd.dump import run_dump
+    from ssd.config import load_config
 
+    delay = delay if delay is not None else ctx.obj.get("delay", 1.0)
     token = _get_token(ctx.obj)
     api = SlackAPI(token, delay=delay)
     workspace = api.get_workspace()
-    attach = ctx.obj["attachments"] or False
+    cfg = load_config(Path(ctx.obj["config_path"]))
+    attach = ctx.obj["attachments"]
+    if attach is None:
+        attach = cfg.settings.attachments
     for target in targets:
         click.echo(f"Dumping {target}...")
         run_dump(api, workspace, target, ctx.obj["output"], token=token, attachments_enabled=attach)
@@ -67,14 +73,20 @@ def dump(ctx, targets, delay):
 @main.command()
 @click.argument("targets", nargs=-1, required=True)
 @click.option("--since", default=None, help="YYYY-MM-DD or Unix timestamp")
-@click.option("--delay", default=1.0, show_default=True)
+@click.option("--delay", default=None, show_default=True, type=float)
 @click.pass_context
 def sync(ctx, targets, since, delay):
     """Incremental sync of channel(s)."""
+    from ssd.config import load_config
+
+    delay = delay if delay is not None else ctx.obj.get("delay", 1.0)
     token = _get_token(ctx.obj)
     api = SlackAPI(token, delay=delay)
     workspace = api.get_workspace()
-    attach = ctx.obj["attachments"] or False
+    cfg = load_config(Path(ctx.obj["config_path"]))
+    attach = ctx.obj["attachments"]
+    if attach is None:
+        attach = cfg.settings.attachments
     for target in targets:
         click.echo(f"Syncing {target}...")
         run_sync(api, workspace, target, ctx.obj["output"], since=since, token=token, attachments_enabled=attach)
@@ -126,7 +138,7 @@ def remove(ctx, target):
 
     parsed = parse_target(target)
     channel_id = parsed.channel_id or parsed.channel_name
-    removed = remove_entry(Path(ctx.obj["config_path"]), channel_id)
+    removed = remove_entry(Path(ctx.obj["config_path"]), channel_id, thread_ts=parsed.thread_ts)
     if removed:
         click.echo(f"Removed {channel_id}")
     else:
@@ -153,12 +165,13 @@ def list_cmd(ctx):
 
 
 @main.command()
-@click.option("--delay", default=1.0, show_default=True)
+@click.option("--delay", default=None, show_default=True, type=float)
 @click.pass_context
 def update(ctx, delay):
     """Sync all channels in ssd.toml."""
     from ssd.config import load_config
 
+    delay = delay if delay is not None else ctx.obj.get("delay", 1.0)
     cfg = load_config(Path(ctx.obj["config_path"]))
     if not cfg.channels and not cfg.threads:
         click.echo("Nothing tracked. Use: ssd add <url>")
@@ -166,7 +179,9 @@ def update(ctx, delay):
     token = _get_token(ctx.obj)
     api = SlackAPI(token, delay=delay)
     workspace = api.get_workspace()
-    attach = ctx.obj["attachments"] or False
+    attach = ctx.obj["attachments"]
+    if attach is None:
+        attach = cfg.settings.attachments
     for ch in cfg.channels:
         click.echo(f"Syncing #{ch.name}...")
         run_sync(api, workspace, ch.id, ctx.obj["output"], since=ch.since, token=token, attachments_enabled=attach)

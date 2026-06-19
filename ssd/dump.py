@@ -1,8 +1,9 @@
+import json
 import click
 from pathlib import Path
 from ssd.api import SlackAPI
 from ssd.parser import parse_target
-from ssd.output import channel_dir, write_messages, write_cursor
+from ssd.output import channel_dir, write_messages, write_cursor, format_markdown
 
 
 def run_dump(api: SlackAPI, workspace: str, target: str, output_root: str, token: str = None, attachments_enabled: bool = False) -> None:
@@ -16,7 +17,10 @@ def run_dump(api: SlackAPI, workspace: str, target: str, output_root: str, token
         thread_dir = out_dir / f"thread_{parsed.thread_ts.replace('.', '_')}"
         raw_replies = api.get_replies(channel_id, parsed.thread_ts)
         enriched = _enrich_list(api, channel_id, raw_replies)
-        write_messages(thread_dir, enriched)
+        sorted_msgs = sorted(enriched, key=lambda m: float(m["ts"]))
+        thread_dir.mkdir(parents=True, exist_ok=True)
+        (thread_dir / "thread.json").write_text(json.dumps(sorted_msgs, indent=2, ensure_ascii=False))
+        (thread_dir / "thread.md").write_text(format_markdown(sorted_msgs))
         if enriched:
             write_cursor(thread_dir, enriched[-1]["ts"])
         click.echo(f"  thread {parsed.thread_ts}: {len(enriched)} replies -> {thread_dir}")

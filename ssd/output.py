@@ -24,6 +24,15 @@ def format_markdown(messages: list[dict]) -> str:
         lines.append(msg.get("text", ""))
         for r in msg.get("reactions", []):
             lines.append(f":{r['name']}: x{r['count']}")
+        for f in msg.get("files", []):
+            local = f.get("local_path", f.get("url", ""))
+            name = f.get("name", local)
+            from pathlib import Path as _Path
+            try:
+                rel = _Path(local).name
+                lines.append(f"[{name}](attachments/{rel})")
+            except Exception:
+                lines.append(f"[{name}]({local})")
         for reply in msg.get("thread", []):
             rdt = _ts_to_dt(reply["ts"])
             lines.append(

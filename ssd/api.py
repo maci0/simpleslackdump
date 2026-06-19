@@ -91,7 +91,7 @@ class SlackAPI:
                 "user_name": self.get_user_name(user_id) if user_id else "unknown",
                 "text": msg.get("text", ""),
                 "reactions": [
-                    {"name": r["name"], "count": r["count"]}
+                    {"name": r["name"], "count": r["count"], "users": r.get("users", [])}
                     for r in msg.get("reactions", [])
                 ],
                 "thread": [],
@@ -107,7 +107,7 @@ class SlackAPI:
                         ),
                         "text": r.get("text", ""),
                         "reactions": [
-                            {"name": rx["name"], "count": rx["count"]}
+                            {"name": rx["name"], "count": rx["count"], "users": rx.get("users", [])}
                             for rx in r.get("reactions", [])
                         ],
                     }

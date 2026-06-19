@@ -1,3 +1,4 @@
+import json
 import click
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,9 +9,13 @@ from ssd.output import channel_dir, read_cursor, write_cursor, merge_messages
 
 
 def _since_to_ts(since: str) -> str:
-    """Convert YYYY-MM-DD string to Unix timestamp string."""
-    dt = datetime.strptime(since, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    return str(dt.timestamp())
+    """Convert YYYY-MM-DD or Unix timestamp string to Unix timestamp string."""
+    try:
+        float(since)  # test if it's already a number
+        return since
+    except ValueError:
+        dt = datetime.strptime(since, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return str(dt.timestamp())
 
 
 def run_sync(
@@ -23,6 +28,30 @@ def run_sync(
     attachments_enabled: bool = False,
 ) -> None:
     parsed = parse_target(target)
+
+    if parsed.thread_ts:
+        channel_id = parsed.channel_id
+        _, channel_name = api.resolve_channel(channel_id)
+        out_dir = channel_dir(output_root, workspace, channel_name, channel_id)
+        thread_dir = out_dir / f"thread_{parsed.thread_ts.replace('.', '_')}"
+        thread_dir.mkdir(parents=True, exist_ok=True)
+        cursor = None if since else read_cursor(thread_dir)
+        raw_replies = api.get_replies(channel_id, parsed.thread_ts)
+        if not raw_replies:
+            click.echo("  no new replies")
+            return
+        enriched = api.enrich(channel_id, raw_replies)
+        sorted_msgs = sorted(enriched, key=lambda m: float(m["ts"]))
+        thread_dir.mkdir(parents=True, exist_ok=True)
+        (thread_dir / "thread.json").write_text(json.dumps(sorted_msgs, indent=2, ensure_ascii=False))
+        from ssd.output import format_markdown
+        (thread_dir / "thread.md").write_text(format_markdown(sorted_msgs))
+        write_cursor(thread_dir, max(m["ts"] for m in enriched))
+        click.echo(f"  thread {parsed.thread_ts}: {len(enriched)} replies")
+        if attachments_enabled and token:
+            from ssd.attachments import download_attachments
+            download_attachments(thread_dir, enriched, token)
+        return
 
     if parsed.channel_id:
         channel_id, channel_name = api.resolve_channel(parsed.channel_id)

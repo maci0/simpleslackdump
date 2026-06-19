@@ -102,12 +102,17 @@ def add_thread(path: Path, *, channel_id: str, thread_ts: str, url: str) -> None
     save_config(path, cfg)
 
 
-def remove_entry(path: Path, channel_id: str) -> bool:
+def remove_entry(path: Path, channel_id: str, thread_ts: Optional[str] = None) -> bool:
     cfg = load_config(path)
     orig_ch = len(cfg.channels)
     orig_th = len(cfg.threads)
-    cfg.channels = [ch for ch in cfg.channels if ch.id != channel_id]
-    cfg.threads = [th for th in cfg.threads if th.channel_id != channel_id]
+    if thread_ts:
+        # remove specific thread only
+        cfg.threads = [t for t in cfg.threads if not (t.channel_id == channel_id and t.thread_ts == thread_ts)]
+    else:
+        # remove channel + all its threads
+        cfg.channels = [ch for ch in cfg.channels if ch.id != channel_id]
+        cfg.threads = [t for t in cfg.threads if t.channel_id != channel_id]
     if len(cfg.channels) == orig_ch and len(cfg.threads) == orig_th:
         return False
     save_config(path, cfg)
