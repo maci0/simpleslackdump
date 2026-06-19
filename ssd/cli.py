@@ -1,4 +1,9 @@
+from pathlib import Path
+
 import click
+
+from ssd.api import SlackAPI
+from ssd.sync import run_sync
 
 
 @click.group()
@@ -22,7 +27,6 @@ def main(ctx, token, output, config_path, attachments, delay):
 def token(ctx):
     """Extract Slack token from macOS desktop app."""
     from ssd.token import extract_token
-    from pathlib import Path
 
     tok = extract_token()
     click.echo(tok)
@@ -32,32 +36,30 @@ def token(ctx):
     click.echo(f"Token saved to {token_path}", err=True)
 
 
+def _get_token(ctx_obj: dict) -> str:
+    from ssd.token import extract_token
+    tok = ctx_obj.get("token")
+    if tok:
+        return tok
+    token_path = Path(ctx_obj["output"]) / ".token"
+    if token_path.exists():
+        return token_path.read_text().strip()
+    return extract_token()
+
+
 @main.command()
 @click.argument("targets", nargs=-1, required=True)
 @click.option("--delay", default=1.0, show_default=True)
 @click.pass_context
 def dump(ctx, targets, delay):
     """Full history dump of channel(s)."""
-    from ssd.token import extract_token
-    from ssd.api import SlackAPI
     from ssd.dump import run_dump
 
-    token = ctx.obj["token"] or _load_token(ctx.obj["output"])
-    if not token:
-        token = extract_token()
-    api = SlackAPI(token, delay=delay)
+    api = SlackAPI(_get_token(ctx.obj), delay=delay)
     workspace = api.get_workspace()
     for target in targets:
         click.echo(f"Dumping {target}...")
         run_dump(api, workspace, target, ctx.obj["output"])
-
-
-def _load_token(output_root: str) -> str | None:
-    from pathlib import Path
-    p = Path(output_root) / ".token"
-    if p.exists():
-        return p.read_text().strip()
-    return None
 
 
 @main.command()
@@ -67,14 +69,7 @@ def _load_token(output_root: str) -> str | None:
 @click.pass_context
 def sync(ctx, targets, since, delay):
     """Incremental sync of channel(s)."""
-    from ssd.token import extract_token
-    from ssd.api import SlackAPI
-    from ssd.sync import run_sync
-
-    token = ctx.obj["token"] or _load_token(ctx.obj["output"])
-    if not token:
-        token = extract_token()
-    api = SlackAPI(token, delay=delay)
+    api = SlackAPI(_get_token(ctx.obj), delay=delay)
     workspace = api.get_workspace()
     for target in targets:
         click.echo(f"Syncing {target}...")
@@ -86,7 +81,35 @@ def sync(ctx, targets, since, delay):
 @click.pass_context
 def add(ctx, target):
     """Add channel/thread to ssd.toml."""
-    click.echo("add: not yet implemented")
+    from ssd.parser import parse_target
+    from ssd.config import add_channel, add_thread
+
+    parsed = parse_target(target)
+    api = SlackAPI(_get_token(ctx.obj))
+    workspace = api.get_workspace()
+    config_path = Path(ctx.obj["config_path"])
+
+    if parsed.thread_ts:
+        add_thread(
+            config_path,
+            channel_id=parsed.channel_id,
+            thread_ts=parsed.thread_ts,
+            url=target,
+        )
+        click.echo(f"Added thread {parsed.thread_ts} in {parsed.channel_id}")
+    else:
+        if parsed.channel_id:
+            cid, name = api.resolve_channel(parsed.channel_id)
+        else:
+            cid, name = api.resolve_channel(parsed.channel_name)
+        add_channel(
+            config_path,
+            id=cid,
+            name=name,
+            url=target if target.startswith("http") else f"#{name}",
+            since=None,
+        )
+        click.echo(f"Added #{name} ({cid})")
 
 
 @main.command()
@@ -94,18 +117,53 @@ def add(ctx, target):
 @click.pass_context
 def remove(ctx, target):
     """Remove channel/thread from ssd.toml."""
-    click.echo("remove: not yet implemented")
+    from ssd.parser import parse_target
+    from ssd.config import remove_entry
+
+    parsed = parse_target(target)
+    channel_id = parsed.channel_id or parsed.channel_name
+    removed = remove_entry(Path(ctx.obj["config_path"]), channel_id)
+    if removed:
+        click.echo(f"Removed {channel_id}")
+    else:
+        click.echo(f"Not found: {channel_id}", err=True)
 
 
 @main.command("list")
 @click.pass_context
 def list_cmd(ctx):
     """Show tracked channels and last sync time."""
-    click.echo("list: not yet implemented")
+    from ssd.config import load_config
+    from ssd.output import read_cursor
+
+    cfg = load_config(Path(ctx.obj["config_path"]))
+    if not cfg.channels and not cfg.threads:
+        click.echo("No channels tracked. Use: ssd add <url>")
+        return
+    for ch in cfg.channels:
+        matches = list(Path(ctx.obj["output"]).glob(f"*/{ch.name}_{ch.id}"))
+        cursor = read_cursor(matches[0]) if matches else None
+        click.echo(f"  #{ch.name} ({ch.id})  last={cursor or 'never'}")
+    for th in cfg.threads:
+        click.echo(f"  thread {th.thread_ts} in {th.channel_id}")
 
 
 @main.command()
+@click.option("--delay", default=1.0, show_default=True)
 @click.pass_context
-def update(ctx):
+def update(ctx, delay):
     """Sync all channels in ssd.toml."""
-    click.echo("update: not yet implemented")
+    from ssd.config import load_config
+
+    cfg = load_config(Path(ctx.obj["config_path"]))
+    if not cfg.channels and not cfg.threads:
+        click.echo("Nothing tracked. Use: ssd add <url>")
+        return
+    api = SlackAPI(_get_token(ctx.obj), delay=delay)
+    workspace = api.get_workspace()
+    for ch in cfg.channels:
+        click.echo(f"Syncing #{ch.name}...")
+        run_sync(api, workspace, ch.id, ctx.obj["output"], since=ch.since)
+    for th in cfg.threads:
+        click.echo(f"Syncing thread {th.thread_ts}...")
+        run_sync(api, workspace, th.url, ctx.obj["output"], since=None)
