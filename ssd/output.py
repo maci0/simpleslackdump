@@ -14,6 +14,19 @@ def _ts_to_dt(ts: str) -> datetime:
     return datetime.fromtimestamp(float(ts), tz=timezone.utc)
 
 
+def _file_link_lines(files: list[dict], prefix: str = "") -> list[str]:
+    result = []
+    for f in files:
+        name = f.get("name") or "file"
+        local_path = f.get("local_path") or ""
+        url = f.get("url") or ""
+        if local_path:
+            result.append(f"{prefix}[{name}](attachments/{Path(local_path).name})")
+        elif url:
+            result.append(f"{prefix}[{name}]({url})")
+    return result
+
+
 def format_markdown(messages: list[dict]) -> str:
     lines = []
     for msg in messages:
@@ -24,29 +37,13 @@ def format_markdown(messages: list[dict]) -> str:
         lines.append(msg.get("text", ""))
         for r in msg.get("reactions", []):
             lines.append(f":{r['name']}: x{r['count']}")
-        for f in msg.get("files", []):
-            name = f.get("name") or "file"
-            local_path = f.get("local_path") or ""
-            url = f.get("url") or ""
-            if local_path:
-                # successfully downloaded — link to local file
-                lines.append(f"[{name}](attachments/{Path(local_path).name})")
-            elif url:
-                # not downloaded (external, deleted, or failed) — link to original
-                lines.append(f"[{name}]({url})")
+        lines.extend(_file_link_lines(msg.get("files", [])))
         for reply in msg.get("thread", []):
             rdt = _ts_to_dt(reply["ts"])
             lines.append(
                 f"> **{reply['user_name']}** *({rdt.strftime('%H:%M')})*: {reply.get('text', '')}"
             )
-            for f in reply.get("files", []):
-                name = f.get("name") or "file"
-                local_path = f.get("local_path") or ""
-                url = f.get("url") or ""
-                if local_path:
-                    lines.append(f"> [{name}](attachments/{Path(local_path).name})")
-                elif url:
-                    lines.append(f"> [{name}]({url})")
+            lines.extend(_file_link_lines(reply.get("files", []), prefix="> "))
         lines.append("")
     return "\n".join(lines)
 

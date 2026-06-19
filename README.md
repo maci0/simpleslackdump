@@ -1,6 +1,6 @@
 # ssd — simpleslackdump
 
-Dump Slack channels and threads to JSON and Markdown. No OAuth setup. No bot token. No Slack app to register. Extracts credentials directly from the running Slack desktop app and Chrome browser.
+Dump Slack channels and threads to JSON and Markdown. No OAuth setup. No bot token. No Slack app to register. Extracts credentials directly from the running Slack desktop app.
 
 ## What it does
 
@@ -8,8 +8,9 @@ Dump Slack channels and threads to JSON and Markdown. No OAuth setup. No bot tok
 - Threads and replies captured in full, merged correctly on re-sync
 - `@user` mentions resolved to display names
 - JSON (all metadata) + Markdown (readable) output per channel
-- File attachment download with skip-already-downloaded
-- `ssd.toml` config to track multiple channels and sync them with one command
+- File attachment download with skip-if-already-downloaded logic
+- `ssd.toml` config to track multiple channels and threads, synced with one command
+- Communication graph export (HTML, opens in browser)
 - Works with Enterprise Grid workspaces
 
 ## Requirements
@@ -18,11 +19,10 @@ Dump Slack channels and threads to JSON and Markdown. No OAuth setup. No bot tok
 |---|---|
 | macOS | Token extraction reads Slack's local app data |
 | [Slack desktop app](https://slack.com/downloads/mac), signed in | Source of the `xoxc-` API token |
-| Chrome or Firefox, signed into Slack | Source of the session cookie (`xoxd-`) |
 | Python 3.11+ | Runtime |
 | [uv](https://docs.astral.sh/uv/) | Dependency/tool management |
 
-Chrome or Firefox must be signed into the **same workspace** as the desktop app.
+Chrome or Firefox is needed for cookie extraction on newer Slack. Older Slack versions store the cookie in plaintext in Slack's own Cookies file, so no browser is required in that case.
 
 ## Install
 
@@ -52,6 +52,9 @@ ssd dump https://yourworkspace.slack.com/archives/C0XXXXXXXXX
 # Also works with channel name or bare ID
 ssd dump "#general"
 ssd dump C0XXXXXXXXX
+
+# Multiple targets in one call
+ssd dump "#general" "#random" C0XXXXXXXXX
 ```
 
 Output in `./output/<workspace>/<channel_name>_<channel_id>/`:
@@ -65,9 +68,9 @@ messages.md       # readable — @mentions resolved to names, timestamps in UTC
 Progress output:
 
 ```
-#general (C0XXXXXXXXX) -> output/myworkspace/general_C0XXXXXXXXX
-fetched 879 messages in 7.3s (120 msg/s)
-879 messages | 175 threads | 1446 replies | 102.5s total (9 msg/s)
+  #general (C0XXXXXXXXX) -> output/myworkspace/general_C0XXXXXXXXX
+  fetched 879 messages in 7.3s (120 msg/s)
+  879 messages | 175 threads | 1446 replies | 102.5s total (9 msg/s)
 ```
 
 ## Incremental sync
@@ -81,7 +84,12 @@ ssd sync "#general" --since 2024-06-01
 
 # Unix timestamp also works
 ssd sync "#general" --since 1717200000
+
+# Multiple targets
+ssd sync "#general" "#random"
 ```
+
+`--since` acts as a floor: messages older than this date are never re-fetched, but the cursor still advances normally as new messages arrive. If both a cursor and `--since` are set, the later of the two is used.
 
 New messages merge into existing `messages.json` — no duplicates, no overwrites. New replies to older messages are also picked up (each known thread is polled for replies newer than the last stored reply).
 
@@ -97,7 +105,7 @@ ssd add "https://yourworkspace.slack.com/archives/C0XXXXXXXXX/p1234567890123456"
 # Show tracked channels and when they were last synced
 ssd list
 
-# Sync all tracked channels in one shot
+# Sync all tracked channels and threads in one shot
 ssd update
 ```
 
@@ -106,6 +114,8 @@ ssd update
 ```toml
 [settings]
 attachments = false     # set to true to download files by default
+output_dir = "./output" # where channel dirs are written
+token_file = ".token"   # token filename inside output_dir
 
 [[channels]]
 id = "C0XXXXXXXXX"
@@ -117,14 +127,22 @@ id = "C0YYYYYYYYY"
 name = "engineering"
 url = "https://yourworkspace.slack.com/archives/C0YYYYYYYYY"
 since = "2024-01-01"   # never fetch messages older than this
+
+[[threads]]
+channel_id = "C0XXXXXXXXX"
+thread_ts = "1234567890.123456"
+url = "https://yourworkspace.slack.com/archives/C0XXXXXXXXX/p1234567890123456"
 ```
 
-Remove a channel:
+Remove a channel or thread:
 
 ```bash
 ssd remove C0XXXXXXXXX
 ssd remove "#general"
 ssd remove https://yourworkspace.slack.com/archives/C0XXXXXXXXX
+
+# Remove a specific tracked thread
+ssd remove "https://yourworkspace.slack.com/archives/C0XXXXXXXXX/p1234567890123456"
 ```
 
 ## Attachments
@@ -137,7 +155,7 @@ ssd --attachments sync "#engineering"
 ssd --attachments update
 ```
 
-Files land in `<channel_dir>/attachments/`. This includes files attached to thread replies, not just top-level messages. Files are skipped on re-run when the local file size matches what Slack reports. If a download fails, the Markdown link falls back to the original Slack URL.
+Files land in `<channel_dir>/attachments/`. This includes files attached to thread replies, not just top-level messages. Files are skipped on re-run when the size is known and the local file already matches. If Slack omits the size field, the file is re-downloaded to avoid keeping a partial file from an interrupted run. If a download fails, the Markdown link falls back to the original Slack URL.
 
 Per-channel override in `ssd.toml`:
 
@@ -156,7 +174,19 @@ Paste a thread URL to dump only that thread's replies:
 ssd dump "https://yourworkspace.slack.com/archives/C0XXXXXXXXX/p1234567890123456"
 ```
 
-Output in `<channel_dir>/thread_<ts>/thread.json` and `thread.md`. `ssd sync` on a thread URL fetches only new replies and merges them.
+Output in `<channel_dir>/thread_1234567890_123456/thread.json` and `thread.md`. Note the thread timestamp uses underscores in the directory name (`1234567890.123456` becomes `thread_1234567890_123456/`). `ssd sync` on a thread URL fetches only new replies and merges them.
+
+## Communication graph
+
+Generate an HTML graph showing who talks to whom across one or more channel dumps:
+
+```bash
+ssd graph output/myworkspace/general_C0XXXXXXXXX
+ssd graph output/myworkspace/general_C0XXXXXXXXX output/myworkspace/engineering_C0YYYYYYYYY
+ssd graph output/myworkspace/general_C0XXXXXXXXX --output graph.html
+```
+
+Opens in the browser. Nodes are users; edges represent message replies and mentions. Useful for mapping active communication patterns across a workspace.
 
 ## All options
 
@@ -173,13 +203,14 @@ Options:
   --attachments / --no-attachments
 
 Commands:
-  token     Extract credentials from Slack desktop app and Chrome
+  token     Extract credentials from Slack desktop app and browser
   dump      Full history dump of one or more channels/threads
   sync      Incremental sync — fetch only new messages since last run
   add       Add a channel or thread to ssd.toml
   remove    Remove a channel or thread from ssd.toml
   list      Show tracked channels and last sync time
-  update    Sync all channels tracked in ssd.toml
+  update    Sync all channels and threads tracked in ssd.toml
+  graph     Generate a communication graph HTML file from channel dumps
 ```
 
 ## How auth works
@@ -187,7 +218,7 @@ Commands:
 `ssd token` runs once to save credentials locally:
 
 1. Finds the `xoxc-` token in Slack's LevelDB (`~/Library/Application Support/Slack/Local Storage/leveldb/`)
-2. Extracts the `d` session cookie — tries in order: Slack's own Cookies file (older Slack), Firefox `cookies.sqlite` (plaintext), Chrome's SQLite store (AES-decrypted via macOS Keychain)
+2. Extracts the `d` session cookie — tries in order: Slack's own Cookies file (older Slack, plaintext), Firefox `cookies.sqlite` (plaintext), Chrome's SQLite store (AES-decrypted via macOS Keychain)
 3. Saves both to `output/.token` and `output/.cookie` (permissions `600`)
 
 Every API call sends `Authorization: Bearer xoxc-...` and `Cookie: d=xoxd-...`. This is how the Slack Electron desktop app itself authenticates — no API keys needed.
@@ -201,10 +232,10 @@ Re-run `ssd token` if commands return `invalid_auth` (e.g. after signing out and
 ## Troubleshooting
 
 **`invalid_auth` on every command:**
-Re-run `ssd token`. The session may have expired or Chrome may not have been open when credentials were extracted.
+Re-run `ssd token`. The session may have expired or the browser may not have been open when credentials were extracted.
 
-**`ssd token` prints "Warning: could not extract d cookie":**
-Make sure Chrome or Firefox is open and signed into the same Slack workspace. Then re-run `ssd token`.
+**`ssd token` prints "Warning: could not extract d cookie (Chrome not found or not logged in)":**
+Both Firefox and Chrome are tried. Make sure at least one of them is open and signed into the same Slack workspace, then re-run `ssd token`.
 
 **Channel not found when using `ssd dump #name`:**
 Use the channel URL or bare ID instead. Name-based lookup pages through `conversations.list` which may time out on large workspaces.

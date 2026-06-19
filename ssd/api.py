@@ -53,45 +53,39 @@ class SlackAPI:
                 break
         raise ValueError(f"Channel not found: {name_or_id}")
 
+    def _paginate(self, sdk_method, base_kwargs: dict, oldest: str | None = None) -> list[dict]:
+        items = []
+        cursor = None
+        while True:
+            kwargs = dict(base_kwargs)
+            if oldest is not None:
+                kwargs["oldest"] = oldest
+            if cursor:
+                kwargs["cursor"] = cursor
+            resp = sdk_method(**kwargs)
+            items.extend(resp["messages"])
+            if not resp.get("has_more"):
+                break
+            cursor = resp["response_metadata"]["next_cursor"]
+            time.sleep(self.delay)
+        return items
+
     def get_messages(
         self, channel_id: str, oldest: Optional[str] = None
     ) -> list[dict]:
-        messages = []
-        cursor = None
-        while True:
-            kwargs: dict = dict(channel=channel_id, limit=200)
-            if oldest is not None:
-                kwargs["oldest"] = oldest
-            if cursor:
-                kwargs["cursor"] = cursor
-            resp = self.client.conversations_history(**kwargs)
-            messages.extend(resp["messages"])
-            if not resp.get("has_more"):
-                break
-            cursor = resp["response_metadata"]["next_cursor"]
-            time.sleep(self.delay)
-        return messages
+        return self._paginate(
+            self.client.conversations_history,
+            {"channel": channel_id, "limit": 200},
+            oldest=oldest,
+        )
 
     def get_replies(self, channel_id: str, thread_ts: str, oldest: Optional[str] = None) -> list[dict]:
-        replies = []
-        cursor = None
-        while True:
-            kwargs: dict = dict(channel=channel_id, ts=thread_ts, limit=200)
-            if oldest is not None:
-                kwargs["oldest"] = oldest
-            if cursor:
-                kwargs["cursor"] = cursor
-            resp = self.client.conversations_replies(**kwargs)
-            batch = resp["messages"]
-            # Skip the root message (ts == thread_ts) wherever it appears in the batch.
-            # Using cursor is None as a proxy is wrong when oldest > root_ts — the root
-            # won't be returned at all in that case, but batch[0] is a real reply.
-            replies.extend(m for m in batch if m.get("ts") != thread_ts)
-            if not resp.get("has_more"):
-                break
-            cursor = resp["response_metadata"]["next_cursor"]
-            time.sleep(self.delay)
-        return replies
+        raw = self._paginate(
+            self.client.conversations_replies,
+            {"channel": channel_id, "ts": thread_ts, "limit": 200},
+            oldest=oldest,
+        )
+        return [m for m in raw if m.get("ts") != thread_ts]
 
     def resolve_mentions(self, text: str) -> str:
         """Replace <@UXXXXXXX> with @display_name."""

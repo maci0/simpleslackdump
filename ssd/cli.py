@@ -209,7 +209,42 @@ def update(ctx, delay):
     api, workspace, token, attach = _make_api(ctx.obj, delay)
     for ch in cfg.channels:
         click.echo(f"Syncing #{ch.name}...")
-        run_sync(api, workspace, ch.id, ctx.obj["output"], since=ch.since, token=token, attachments_enabled=attach)
+        ch_attach = ch.attachments if ch.attachments is not None else attach
+        run_sync(api, workspace, ch.id, ctx.obj["output"], since=ch.since, token=token, attachments_enabled=ch_attach)
     for th in cfg.threads:
         click.echo(f"Syncing thread {th.thread_ts}...")
         run_sync(api, workspace, th.url, ctx.obj["output"], since=None, token=token, attachments_enabled=attach)
+
+
+@main.command()
+@click.argument("channel_dirs", nargs=-1, type=click.Path(exists=True, file_okay=False))
+@click.option("--output", default="graph.html", show_default=True, help="Output HTML file path")
+@click.pass_context
+def graph(ctx, channel_dirs, output):
+    """Generate an interactive communication graph from dumped channels.
+
+    Without arguments, uses all channel directories under the output dir.
+    Opens the resulting HTML file in a browser.
+    """
+    from ssd.graph import build_graph, render_html
+
+    dirs = [Path(d) for d in channel_dirs]
+    if not dirs:
+        out = Path(ctx.obj["output"])
+        dirs = [p.parent for p in out.rglob("messages.json")]
+    if not dirs:
+        click.echo("No channel data found. Run 'ssd dump' first.", err=True)
+        return
+
+    data = build_graph(dirs)
+    if not data["nodes"]:
+        click.echo("No users found in message data.", err=True)
+        return
+
+    html = render_html(data)
+    Path(output).write_text(html, encoding="utf-8")
+    click.echo(
+        f"Graph: {output} — {len(data['nodes'])} users, {len(data['links'])} connections"
+    )
+    import webbrowser, os
+    webbrowser.open(f"file://{os.path.abspath(output)}")

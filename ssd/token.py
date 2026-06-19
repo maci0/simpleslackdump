@@ -9,8 +9,8 @@ from urllib.parse import unquote
 COOKIES_PATH = Path.home() / "Library/Application Support/Slack/Cookies"
 LEVELDB_PATH = Path.home() / "Library/Application Support/Slack/Local Storage/leveldb"
 
-# Regex for xoxc/d/s/p tokens in binary data (xoxc tokens in LevelDB use full hex hash)
-_TOKEN_RE = re.compile(rb"(xox[cdsp]-[A-Za-z0-9\-]+)")
+# xoxd- is a session cookie, not a bearer token — excluded here; see extract_cookie()
+_TOKEN_RE = re.compile(rb"(xox[bcps]-[A-Za-z0-9\-]+)")
 # Regex for URL-encoded cookie values (d cookie contains slashes encoded as %2F)
 _COOKIE_RE = re.compile(rb"xox[a-z]+-[A-Za-z0-9%\-]+")
 

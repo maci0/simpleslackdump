@@ -72,6 +72,9 @@ def run_sync(
         thread_dir.mkdir(parents=True, exist_ok=True)  # single mkdir
         oldest = _since_to_ts(since) if since else read_cursor(thread_dir)
         raw_replies = api.get_replies(channel_id, parsed.thread_ts, oldest=oldest)
+        # oldest= is inclusive — filter to strictly newer replies to avoid reprocessing cursor
+        if oldest:
+            raw_replies = [r for r in raw_replies if r["ts"] > oldest]
         if not raw_replies:
             click.echo("  no new replies")
             return
@@ -101,10 +104,14 @@ def run_sync(
     out_dir = channel_dir(output_root, workspace, channel_name, channel_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if since:
-        oldest = _since_to_ts(since)
+    since_ts = _since_to_ts(since) if since else None
+    cursor_ts = read_cursor(out_dir)
+    # since= is a floor — use the later of cursor vs floor so we never
+    # re-fetch messages already captured, but never go older than the floor.
+    if since_ts and cursor_ts:
+        oldest = since_ts if since_ts > cursor_ts else cursor_ts
     else:
-        oldest = read_cursor(out_dir)
+        oldest = cursor_ts or since_ts
 
     click.echo(f"  #{channel_name} ({channel_id}) oldest={oldest or 'all'} -> {out_dir}")
 

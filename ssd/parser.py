@@ -35,7 +35,8 @@ def parse_target(target: str) -> SlackTarget:
         return SlackTarget(channel_id=channel_id, workspace=workspace)
 
     # Bare Slack ID (C, D, G prefix)
-    if re.match(r"^[CDG][A-Z0-9a-z]+$", target):
+    from ssd.api import _ID_RE
+    if _ID_RE.match(target):
         return SlackTarget(channel_id=target)
 
     # Channel name (#general or general)
