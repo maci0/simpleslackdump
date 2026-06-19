@@ -53,11 +53,13 @@ class SlackAPI:
             time.sleep(self.delay)
         return messages
 
-    def get_replies(self, channel_id: str, thread_ts: str) -> list[dict]:
+    def get_replies(self, channel_id: str, thread_ts: str, oldest: Optional[str] = None) -> list[dict]:
         replies = []
         cursor = None
         while True:
             kwargs: dict = dict(channel=channel_id, ts=thread_ts, limit=200)
+            if oldest is not None:
+                kwargs["oldest"] = oldest
             if cursor:
                 kwargs["cursor"] = cursor
             resp = self.client.conversations_replies(**kwargs)

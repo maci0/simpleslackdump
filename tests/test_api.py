@@ -90,6 +90,21 @@ def test_get_replies_excludes_root(mock_client):
     assert replies[0]["ts"] == "1.1"
 
 
+def test_get_replies_passes_oldest(mock_client):
+    mock_client.conversations_replies.return_value = {
+        "messages": [
+            {"ts": "1.0", "user": "U1", "text": "root"},
+            {"ts": "1.5", "user": "U2", "text": "new reply"},
+        ],
+        "has_more": False,
+        "response_metadata": {"next_cursor": ""},
+    }
+    api = SlackAPI("xoxd-fake", delay=0)
+    replies = api.get_replies("C123", "1.0", oldest="1.2")
+    call_kwargs = mock_client.conversations_replies.call_args[1]
+    assert call_kwargs.get("oldest") == "1.2"
+
+
 def test_enrich_adds_user_name_and_thread(mock_client):
     # users_info for U1
     mock_client.users_info.return_value = {
