@@ -11,9 +11,9 @@ def mock_client(mocker):
 
 
 def test_get_workspace(mock_client):
-    mock_client.auth_test.return_value = {"team_domain": "redhat"}
+    mock_client.auth_test.return_value = {"team_domain": "acme"}
     api = SlackAPI("xoxd-fake")
-    assert api.get_workspace() == "redhat"
+    assert api.get_workspace() == "acme"
 
 
 def test_resolve_channel_by_id(mock_client):

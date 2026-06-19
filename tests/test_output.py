@@ -37,8 +37,8 @@ MSG_B = {
 
 
 def test_channel_dir_path(tmp_path):
-    d = channel_dir(str(tmp_path), "redhat.enterprise", "general", "C0BAF26EJ2Z")
-    assert d == tmp_path / "redhat.enterprise" / "general_C0BAF26EJ2Z"
+    d = channel_dir(str(tmp_path), "acme.enterprise", "general", "C0BAF26EJ2Z")
+    assert d == tmp_path / "acme.enterprise" / "general_C0BAF26EJ2Z"
 
 
 def test_write_messages_creates_json(tmp_path):

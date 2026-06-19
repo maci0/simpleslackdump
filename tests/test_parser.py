@@ -3,20 +3,20 @@ from ssd.parser import parse_target, SlackTarget
 
 
 def test_parse_channel_url():
-    t = parse_target("https://redhat.enterprise.slack.com/archives/C0BAF26EJ2Z")
+    t = parse_target("https://acme.enterprise.slack.com/archives/C0BAF26EJ2Z")
     assert t.channel_id == "C0BAF26EJ2Z"
-    assert t.workspace == "redhat.enterprise"
+    assert t.workspace == "acme.enterprise"
     assert t.thread_ts is None
     assert t.channel_name is None
 
 
 def test_parse_thread_url():
     t = parse_target(
-        "https://redhat.enterprise.slack.com/archives/C0BAF26EJ2Z/p1234567890123456"
+        "https://acme.enterprise.slack.com/archives/C0BAF26EJ2Z/p1234567890123456"
     )
     assert t.channel_id == "C0BAF26EJ2Z"
     assert t.thread_ts == "1234567890.123456"
-    assert t.workspace == "redhat.enterprise"
+    assert t.workspace == "acme.enterprise"
 
 
 def test_parse_channel_id():

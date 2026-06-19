@@ -30,7 +30,7 @@ class SlackAPI:
         domain = resp.get("team_domain")
         if not domain:
             url = resp.get("url", "")
-            # https://redhat.enterprise.slack.com/ -> redhat.enterprise
+            # https://acme.enterprise.slack.com/ -> acme.enterprise
             from urllib.parse import urlparse
             host = urlparse(url).hostname or ""
             domain = host.replace(".slack.com", "") if host.endswith(".slack.com") else host
