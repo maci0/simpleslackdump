@@ -8,6 +8,7 @@ dependencies = [
     "click>=8.1",
     "tomlkit>=0.13",
     "requests>=2.31",
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

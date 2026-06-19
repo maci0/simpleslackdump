@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Optional
 
 import click
 
@@ -26,15 +27,26 @@ def main(ctx, token, output, config_path, attachments, delay):
 @click.pass_context
 def token(ctx):
     """Extract Slack token from macOS desktop app."""
-    from ssd.token import extract_token
+    from ssd.token import extract_token, extract_cookie
 
     tok = extract_token()
     click.echo(tok)
-    token_path = Path(ctx.obj["output"]) / ".token"
-    token_path.parent.mkdir(parents=True, exist_ok=True)
+    out = Path(ctx.obj["output"])
+    out.mkdir(parents=True, exist_ok=True)
+    token_path = out / ".token"
     token_path.write_text(tok)
     token_path.chmod(0o600)
     click.echo(f"Token saved to {token_path}", err=True)
+
+    cookie = extract_cookie()
+    if cookie:
+        cookie_path = out / ".cookie"
+        cookie_path.write_text(cookie)
+        cookie_path.chmod(0o600)
+        click.echo(f"Cookie saved to {cookie_path}", err=True)
+    else:
+        click.echo("Warning: could not extract d cookie (Chrome not found or not logged in). "
+                   "API calls may fail for newer Slack versions.", err=True)
 
 
 def _get_token(ctx_obj: dict) -> str:
@@ -48,6 +60,13 @@ def _get_token(ctx_obj: dict) -> str:
     return extract_token()
 
 
+def _get_cookie(ctx_obj: dict) -> Optional[str]:
+    cookie_path = Path(ctx_obj["output"]) / ".cookie"
+    if cookie_path.exists():
+        return cookie_path.read_text().strip()
+    return None
+
+
 @main.command()
 @click.argument("targets", nargs=-1, required=True)
 @click.option("--delay", default=None, show_default=True, type=float)
@@ -59,7 +78,8 @@ def dump(ctx, targets, delay):
 
     delay = delay if delay is not None else ctx.obj.get("delay", 1.0)
     token = _get_token(ctx.obj)
-    api = SlackAPI(token, delay=delay)
+    cookie = _get_cookie(ctx.obj)
+    api = SlackAPI(token, delay=delay, cookie=cookie)
     workspace = api.get_workspace()
     cfg = load_config(Path(ctx.obj["config_path"]))
     attach = ctx.obj["attachments"]
@@ -81,7 +101,8 @@ def sync(ctx, targets, since, delay):
 
     delay = delay if delay is not None else ctx.obj.get("delay", 1.0)
     token = _get_token(ctx.obj)
-    api = SlackAPI(token, delay=delay)
+    cookie = _get_cookie(ctx.obj)
+    api = SlackAPI(token, delay=delay, cookie=cookie)
     workspace = api.get_workspace()
     cfg = load_config(Path(ctx.obj["config_path"]))
     attach = ctx.obj["attachments"]
@@ -101,7 +122,7 @@ def add(ctx, target):
     from ssd.config import add_channel, add_thread
 
     parsed = parse_target(target)
-    api = SlackAPI(_get_token(ctx.obj))
+    api = SlackAPI(_get_token(ctx.obj), cookie=_get_cookie(ctx.obj))
     workspace = api.get_workspace()
     config_path = Path(ctx.obj["config_path"])
 
@@ -177,7 +198,8 @@ def update(ctx, delay):
         click.echo("Nothing tracked. Use: ssd add <url>")
         return
     token = _get_token(ctx.obj)
-    api = SlackAPI(token, delay=delay)
+    cookie = _get_cookie(ctx.obj)
+    api = SlackAPI(token, delay=delay, cookie=cookie)
     workspace = api.get_workspace()
     attach = ctx.obj["attachments"]
     if attach is None:

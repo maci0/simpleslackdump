@@ -1,20 +1,39 @@
 import re
 import time
 from typing import Optional
+from urllib.parse import quote
 from slack_sdk import WebClient
 
 
 _ID_RE = re.compile(r"^[CDG][A-Z0-9a-z]+$")
 
 
+def _url_encode_cookie(cookie: str) -> str:
+    """URL-encode the xoxd- cookie value for use in a Cookie header.
+    Slack stores the cookie URL-encoded (/ -> %2F, + -> %2B).
+    """
+    return quote(cookie, safe="-")
+
+
 class SlackAPI:
-    def __init__(self, token: str, delay: float = 1.0):
-        self.client = WebClient(token=token)
+    def __init__(self, token: str, delay: float = 1.0, cookie: Optional[str] = None):
+        # xoxc- tokens require the d cookie sent alongside; xoxd-/xoxb- work standalone
+        headers = {"Cookie": f"d={_url_encode_cookie(cookie)}"} if cookie else {}
+        self.client = WebClient(token=token, headers=headers)
         self.delay = delay
         self._user_cache: dict[str, str] = {}
 
     def get_workspace(self) -> str:
-        return self.client.auth_test()["team_domain"]
+        resp = self.client.auth_test()
+        # Enterprise Grid workspaces omit team_domain; extract from url instead
+        domain = resp.get("team_domain")
+        if not domain:
+            url = resp.get("url", "")
+            # https://redhat.enterprise.slack.com/ -> redhat.enterprise
+            from urllib.parse import urlparse
+            host = urlparse(url).hostname or ""
+            domain = host.replace(".slack.com", "") if host.endswith(".slack.com") else host
+        return domain
 
     def resolve_channel(self, name_or_id: str) -> tuple[str, str]:
         if _ID_RE.match(name_or_id):
