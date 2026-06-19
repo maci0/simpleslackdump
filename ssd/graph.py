@@ -189,8 +189,10 @@ d3svg.call(zoom);
 // ── Simulation ──────────────────────────────────────────────────────────────
 const sim = d3.forceSimulation(nodes)
   .force("link", d3.forceLink(links).id(d => d.id).distance(d => 50 + 60 / Math.sqrt(d.value || 1)))
-  .force("charge", d3.forceManyBody().strength(d => -180 - r(d) * 8))
-  .force("center", d3.forceCenter(W/2, H/2))
+  .force("charge", d3.forceManyBody().strength(d => -120 - r(d) * 5))
+  .force("center", d3.forceCenter(W/2, H/2).strength(0.08))
+  .force("x", d3.forceX(W/2).strength(0.06))
+  .force("y", d3.forceY(H/2).strength(0.06))
   .force("collision", d3.forceCollide().radius(d => r(d) + 3));
 
 // ── Render ───────────────────────────────────────────────────────────────────
@@ -220,7 +222,13 @@ node.append("text")
   .attr("font-size", d => Math.min(12, Math.max(8, r(d) * 0.8)) + "px")
   .text(d => d.id);
 
+const PAD = 200;
 sim.on("tick", () => {{
+  // Clamp so isolated nodes can't escape arbitrarily far
+  nodes.forEach(d => {{
+    d.x = Math.max(-PAD, Math.min(W+PAD, d.x));
+    d.y = Math.max(-PAD, Math.min(H+PAD, d.y));
+  }});
   link.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
       .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
   node.attr("transform", d => `translate(${{d.x}},${{d.y}})`);
