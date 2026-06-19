@@ -16,13 +16,23 @@ Dump Slack channels and threads to JSON and Markdown. macOS only, no Slack app c
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
+**Install as a tool (recommended):**
+
+```bash
+uv tool install git+https://github.com/maci0/simpleslackdump
+ssd --help
+```
+
+**Or clone and run locally:**
+
 ```bash
 git clone https://github.com/maci0/simpleslackdump
 cd simpleslackdump
 uv sync
+uv run ssd --help
 ```
 
-> **Note:** If you need LevelDB-based token extraction (fallback method), install `brew install leveldb` first, then `uv sync --extra leveldb`.
+> **Note:** If you need LevelDB-based token extraction (fallback method), install `brew install leveldb` first, then add `--extra leveldb` to the install command.
 
 ## Quick start
 
