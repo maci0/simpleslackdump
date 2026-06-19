@@ -4,15 +4,17 @@ import click
 @click.group()
 @click.option("--token", envvar="SSD_TOKEN", default=None, help="Slack token override")
 @click.option("--output", default="./output", show_default=True, help="Output directory")
-@click.option("--config", "config_path", default="./ssd.toml", show_default=True)
+@click.option("--config", "config_path", default="./ssd.toml", show_default=True, help="Path to config file")
 @click.option("--attachments/--no-attachments", default=None)
+@click.option("--delay", default=1.0, show_default=True, help="Seconds between API calls")
 @click.pass_context
-def main(ctx, token, output, config_path, attachments):
+def main(ctx, token, output, config_path, attachments, delay):
     ctx.ensure_object(dict)
     ctx.obj["token"] = token
     ctx.obj["output"] = output
     ctx.obj["config_path"] = config_path
     ctx.obj["attachments"] = attachments
+    ctx.obj["delay"] = delay
 
 
 @main.command()
