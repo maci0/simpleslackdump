@@ -127,20 +127,9 @@ class SlackAPI:
     def enrich(self, channel_id: str, messages: list[dict]) -> list[dict]:
         result = []
         for msg in messages:
-            user_id = msg.get("user", "")
-            enriched = {
-                "ts": msg["ts"],
-                "user": user_id,
-                "user_name": self.get_user_name(user_id) if user_id else "unknown",
-                "text": self.resolve_mentions(msg.get("text", "")),
-                "reactions": [
-                    {"name": r["name"], "count": r["count"], "users": r.get("users", [])}
-                    for r in msg.get("reactions", [])
-                ],
-                "files": msg.get("files", []),
-                "thread": [],
-            }
-            if msg.get("reply_count", 0) > 0:
+            enriched = {**self.enrich_reply(msg), "thread": []}
+            # reply_count can be null from the API (deleted thread) — guard with or 0
+            if (msg.get("reply_count") or 0) > 0:
                 raw_replies = self.get_replies(channel_id, msg["ts"])
                 enriched["thread"] = [self.enrich_reply(r) for r in raw_replies]
             result.append(enriched)

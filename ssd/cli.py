@@ -1,3 +1,4 @@
+import glob as _glob
 from pathlib import Path
 from typing import Optional
 
@@ -67,6 +68,20 @@ def _get_cookie(ctx_obj: dict) -> Optional[str]:
     return None
 
 
+def _make_api(ctx_obj: dict, delay: float) -> tuple[SlackAPI, str, str, bool]:
+    """Return (api, workspace, token, attach). Shared setup for dump/sync/update."""
+    from ssd.config import load_config
+    token = _get_token(ctx_obj)
+    cookie = _get_cookie(ctx_obj)
+    api = SlackAPI(token, delay=delay, cookie=cookie)
+    workspace = api.get_workspace()
+    cfg = load_config(Path(ctx_obj["config_path"]))
+    attach = ctx_obj["attachments"]
+    if attach is None:
+        attach = cfg.settings.attachments
+    return api, workspace, token, attach
+
+
 @main.command()
 @click.argument("targets", nargs=-1, required=True)
 @click.option("--delay", default=None, show_default=True, type=float)
@@ -74,17 +89,9 @@ def _get_cookie(ctx_obj: dict) -> Optional[str]:
 def dump(ctx, targets, delay):
     """Full history dump of channel(s)."""
     from ssd.dump import run_dump
-    from ssd.config import load_config
 
     delay = delay if delay is not None else ctx.obj.get("delay", 1.0)
-    token = _get_token(ctx.obj)
-    cookie = _get_cookie(ctx.obj)
-    api = SlackAPI(token, delay=delay, cookie=cookie)
-    workspace = api.get_workspace()
-    cfg = load_config(Path(ctx.obj["config_path"]))
-    attach = ctx.obj["attachments"]
-    if attach is None:
-        attach = cfg.settings.attachments
+    api, workspace, token, attach = _make_api(ctx.obj, delay)
     for target in targets:
         click.echo(f"Dumping {target}...")
         run_dump(api, workspace, target, ctx.obj["output"], token=token, attachments_enabled=attach)
@@ -97,17 +104,8 @@ def dump(ctx, targets, delay):
 @click.pass_context
 def sync(ctx, targets, since, delay):
     """Incremental sync of channel(s)."""
-    from ssd.config import load_config
-
     delay = delay if delay is not None else ctx.obj.get("delay", 1.0)
-    token = _get_token(ctx.obj)
-    cookie = _get_cookie(ctx.obj)
-    api = SlackAPI(token, delay=delay, cookie=cookie)
-    workspace = api.get_workspace()
-    cfg = load_config(Path(ctx.obj["config_path"]))
-    attach = ctx.obj["attachments"]
-    if attach is None:
-        attach = cfg.settings.attachments
+    api, workspace, token, attach = _make_api(ctx.obj, delay)
     for target in targets:
         click.echo(f"Syncing {target}...")
         run_sync(api, workspace, target, ctx.obj["output"], since=since, token=token, attachments_enabled=attach)
@@ -188,7 +186,6 @@ def list_cmd(ctx):
         click.echo("No channels tracked. Use: ssd add <url>")
         return
     for ch in cfg.channels:
-        import glob as _glob
         pattern = f"*/{_glob.escape(ch.name)}_{_glob.escape(ch.id)}"
         matches = list(Path(ctx.obj["output"]).glob(pattern))
         cursor = read_cursor(matches[0]) if matches else None
@@ -209,13 +206,7 @@ def update(ctx, delay):
     if not cfg.channels and not cfg.threads:
         click.echo("Nothing tracked. Use: ssd add <url>")
         return
-    token = _get_token(ctx.obj)
-    cookie = _get_cookie(ctx.obj)
-    api = SlackAPI(token, delay=delay, cookie=cookie)
-    workspace = api.get_workspace()
-    attach = ctx.obj["attachments"]
-    if attach is None:
-        attach = cfg.settings.attachments
+    api, workspace, token, attach = _make_api(ctx.obj, delay)
     for ch in cfg.channels:
         click.echo(f"Syncing #{ch.name}...")
         run_sync(api, workspace, ch.id, ctx.obj["output"], since=ch.since, token=token, attachments_enabled=attach)

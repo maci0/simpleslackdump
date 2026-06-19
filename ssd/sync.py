@@ -75,7 +75,7 @@ def run_sync(
         if not raw_replies:
             click.echo("  no new replies")
             return
-        enriched = api.enrich(channel_id, raw_replies)
+        enriched = [api.enrich_reply(r) for r in raw_replies]
         if attachments_enabled and token:
             from ssd.attachments import download_attachments
             enriched = download_attachments(thread_dir, enriched, token)

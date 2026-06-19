@@ -137,7 +137,7 @@ ssd --attachments sync "#engineering"
 ssd --attachments update
 ```
 
-Files land in `<channel_dir>/attachments/`. Files are skipped on re-run when the local file size matches the size reported by Slack. Markdown links point to the local file; if a download failed, the link points to the original Slack URL instead.
+Files land in `<channel_dir>/attachments/`. This includes files attached to thread replies, not just top-level messages. Files are skipped on re-run when the local file size matches what Slack reports. If a download fails, the Markdown link falls back to the original Slack URL.
 
 Per-channel override in `ssd.toml`:
 

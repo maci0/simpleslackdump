@@ -54,10 +54,13 @@ def test_run_dump_resolves_channel_name(tmp_path, mock_api):
 
 
 def test_run_dump_thread_url(tmp_path, mock_api):
-    """Thread-only dump uses get_replies, not get_messages."""
-    mock_api.get_replies.return_value = [
-        {"ts": "1.1", "user": "U2", "text": "reply", "reactions": []}
-    ]
+    """Thread-only dump uses get_replies + enrich_reply, not get_messages."""
+    raw_reply = {"ts": "1.1", "user": "U2", "text": "reply", "reactions": [], "files": []}
+    mock_api.get_replies.return_value = [raw_reply]
+    mock_api.enrich_reply.return_value = {
+        "ts": "1.1", "user": "U2", "user_name": "bob",
+        "text": "reply", "reactions": [], "files": [],
+    }
     run_dump(
         mock_api,
         "testteam",
@@ -65,3 +68,4 @@ def test_run_dump_thread_url(tmp_path, mock_api):
         str(tmp_path),
     )
     mock_api.get_replies.assert_called_once()
+    mock_api.enrich_reply.assert_called_once_with(raw_reply)

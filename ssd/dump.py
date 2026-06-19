@@ -17,7 +17,7 @@ def run_dump(api: SlackAPI, workspace: str, target: str, output_root: str, token
         thread_dir = out_dir / f"thread_{parsed.thread_ts.replace('.', '_')}"
         t0 = time.monotonic()
         raw_replies = api.get_replies(channel_id, parsed.thread_ts)
-        enriched = api.enrich(channel_id, raw_replies)
+        enriched = [api.enrich_reply(r) for r in raw_replies]
         if attachments_enabled and token:
             from ssd.attachments import download_attachments
             enriched = download_attachments(thread_dir, enriched, token)

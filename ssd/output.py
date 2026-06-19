@@ -39,6 +39,14 @@ def format_markdown(messages: list[dict]) -> str:
             lines.append(
                 f"> **{reply['user_name']}** *({rdt.strftime('%H:%M')})*: {reply.get('text', '')}"
             )
+            for f in reply.get("files", []):
+                name = f.get("name") or "file"
+                local_path = f.get("local_path") or ""
+                url = f.get("url") or ""
+                if local_path:
+                    lines.append(f"> [{name}](attachments/{Path(local_path).name})")
+                elif url:
+                    lines.append(f"> [{name}]({url})")
         lines.append("")
     return "\n".join(lines)
 
