@@ -1,8 +1,6 @@
-import pytest
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-from ssd.attachments import download_attachments
+from unittest.mock import MagicMock, patch
 
+from ssd.attachments import download_attachments
 
 MESSAGES_WITH_FILE = [
     {

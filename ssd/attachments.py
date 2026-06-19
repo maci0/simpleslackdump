@@ -1,14 +1,16 @@
 import re as _re
-import requests
 from pathlib import Path
+from typing import Any
+
+import requests
 
 
 def _safe_name(name: str) -> str:
     """Strip path separators and leading dots from Slack filenames."""
     # Replace any path separator or null byte with underscore
-    safe = _re.sub(r'[/\\:\x00]', '_', name)
+    safe = _re.sub(r"[/\\:\x00]", "_", name)
     # Prevent hidden files and relative path escape
-    return safe.lstrip('.') or "file"
+    return safe.lstrip(".") or "file"
 
 
 def _download_file(url: str, dest: Path, size: int | None, token: str) -> str:
@@ -29,21 +31,35 @@ def _download_file(url: str, dest: Path, size: int | None, token: str) -> str:
     return ""  # failed; caller preserves original url in the url field
 
 
-def _enrich_file(f: dict, ts: str, att_dir: Path, token: str) -> dict:
+def _enrich_file(f: dict[str, Any], ts: str, att_dir: Path, token: str) -> dict[str, Any]:
     """Resolve one Slack file object to an enriched dict with local_path set."""
     url = f.get("url_private_download") or f.get("url_private") or ""
     raw_name = f.get("name") or f.get("title") or f.get("id") or "unknown"
     name = _safe_name(raw_name)
     if not url:
-        return {"name": name, "url": "", "local_path": "", "mimetype": f.get("mimetype", ""), "size": 0}
+        return {
+            "name": name,
+            "url": "",
+            "local_path": "",
+            "mimetype": f.get("mimetype", ""),
+            "size": 0,
+        }
     att_dir.mkdir(parents=True, exist_ok=True)
     ts_prefix = ts.replace(".", "_")
     dest = att_dir / f"{ts_prefix}_{name}"
     local_path = _download_file(url, dest, f.get("size"), token)
-    return {"name": name, "url": url, "local_path": local_path, "mimetype": f.get("mimetype", ""), "size": f.get("size") or 0}
+    return {
+        "name": name,
+        "url": url,
+        "local_path": local_path,
+        "mimetype": f.get("mimetype", ""),
+        "size": f.get("size") or 0,
+    }
 
 
-def download_attachments(dir: Path, messages: list[dict], token: str) -> list[dict]:
+def download_attachments(
+    dir: Path, messages: list[dict[str, Any]], token: str
+) -> list[dict[str, Any]]:
     att_dir = dir / "attachments"
     result = []
     for msg in messages:
@@ -52,7 +68,12 @@ def download_attachments(dir: Path, messages: list[dict], token: str) -> list[di
             updated["files"] = [_enrich_file(f, msg["ts"], att_dir, token) for f in msg["files"]]
         if msg.get("thread"):
             updated["thread"] = [
-                {**reply, "files": [_enrich_file(f, reply["ts"], att_dir, token) for f in reply.get("files", [])]}
+                {
+                    **reply,
+                    "files": [
+                        _enrich_file(f, reply["ts"], att_dir, token) for f in reply.get("files", [])
+                    ],
+                }
                 for reply in msg["thread"]
             ]
         result.append(updated)

@@ -1,7 +1,8 @@
 import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any
+
 import tomlkit
 
 
@@ -17,8 +18,8 @@ class ChannelEntry:
     id: str
     name: str
     url: str
-    since: Optional[str] = None
-    attachments: Optional[bool] = None
+    since: str | None = None
+    attachments: bool | None = None
 
 
 @dataclass
@@ -35,7 +36,7 @@ class Config:
     threads: list[ThreadEntry] = field(default_factory=list)
 
 
-def _filter_fields(dc_class, raw: dict) -> dict:
+def _filter_fields(dc_class: type, raw: dict[str, Any]) -> dict[str, Any]:
     """Keep only keys that are valid fields of the dataclass, ignoring unknown TOML keys."""
     valid = {f.name for f in dataclasses.fields(dc_class)}
     return {k: v for k, v in raw.items() if k in valid}
@@ -47,13 +48,9 @@ def load_config(path: Path) -> Config:
     doc = tomlkit.loads(path.read_text())
     settings = Settings(**_filter_fields(Settings, doc.get("settings", {})))
     channels = [
-        ChannelEntry(**_filter_fields(ChannelEntry, dict(ch)))
-        for ch in doc.get("channels", [])
+        ChannelEntry(**_filter_fields(ChannelEntry, dict(ch))) for ch in doc.get("channels", [])
     ]
-    threads = [
-        ThreadEntry(**_filter_fields(ThreadEntry, dict(t)))
-        for t in doc.get("threads", [])
-    ]
+    threads = [ThreadEntry(**_filter_fields(ThreadEntry, dict(t))) for t in doc.get("threads", [])]
     return Config(settings=settings, channels=channels, threads=threads)
 
 
@@ -89,9 +86,7 @@ def save_config(path: Path, config: Config) -> None:
     path.write_text(tomlkit.dumps(doc))
 
 
-def add_channel(
-    path: Path, *, id: str, name: str, url: str, since: Optional[str]
-) -> None:
+def add_channel(path: Path, *, id: str, name: str, url: str, since: str | None) -> None:
     cfg = load_config(path)
     for ch in cfg.channels:
         if ch.id == id:
@@ -109,13 +104,15 @@ def add_thread(path: Path, *, channel_id: str, thread_ts: str, url: str) -> None
     save_config(path, cfg)
 
 
-def remove_entry(path: Path, channel_id: str, thread_ts: Optional[str] = None) -> bool:
+def remove_entry(path: Path, channel_id: str, thread_ts: str | None = None) -> bool:
     cfg = load_config(path)
     orig_ch = len(cfg.channels)
     orig_th = len(cfg.threads)
     if thread_ts:
         # remove specific thread only
-        cfg.threads = [t for t in cfg.threads if not (t.channel_id == channel_id and t.thread_ts == thread_ts)]
+        cfg.threads = [
+            t for t in cfg.threads if not (t.channel_id == channel_id and t.thread_ts == thread_ts)
+        ]
     else:
         # remove channel + all its threads
         cfg.channels = [ch for ch in cfg.channels if ch.id != channel_id]

@@ -1,16 +1,15 @@
 import json
-import click
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
+
+import click
+
 from ssd.api import SlackAPI
+from ssd.output import channel_dir, merge_messages, read_cursor, write_cursor, write_messages
 from ssd.parser import parse_target
-from ssd.output import channel_dir, read_cursor, write_cursor, write_messages, merge_messages
 
 
-def _refresh_old_threads(
-    api: SlackAPI, channel_id: str, out_dir: Path, cursor_ts: str
-) -> None:
+def _refresh_old_threads(api: SlackAPI, channel_id: str, out_dir: Path, cursor_ts: str) -> None:
     """Fetch new replies for threads on messages older than cursor_ts.
 
     conversations_history with oldest= misses replies added to pre-cursor messages.
@@ -50,7 +49,7 @@ def _since_to_ts(since: str) -> str:
         float(since)  # test if it's already a number
         return since
     except ValueError:
-        dt = datetime.strptime(since, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        dt = datetime.strptime(since, "%Y-%m-%d").replace(tzinfo=UTC)
         return str(dt.timestamp())
 
 
@@ -59,8 +58,8 @@ def run_sync(
     workspace: str,
     target: str,
     output_root: str,
-    since: Optional[str],
-    token: str = None,
+    since: str | None,
+    token: str | None = None,
     attachments_enabled: bool = False,
 ) -> None:
     parsed = parse_target(target)
@@ -82,16 +81,22 @@ def run_sync(
         enriched = [api.enrich_reply(r) for r in raw_replies]
         if attachments_enabled and token:
             from ssd.attachments import download_attachments
+
             enriched = download_attachments(thread_dir, enriched, token)
         # load existing thread replies and merge by ts (incremental sync)
         existing_path = thread_dir / "thread.json"
-        existing: list[dict] = json.loads(existing_path.read_text()) if existing_path.exists() else []
+        existing: list[dict] = (
+            json.loads(existing_path.read_text()) if existing_path.exists() else []
+        )
         by_ts = {m["ts"]: m for m in existing}
         for m in enriched:
             by_ts[m["ts"]] = m
         sorted_msgs = sorted(by_ts.values(), key=lambda m: float(m["ts"]))
-        from ssd.output import format_markdown, _atomic_write
-        _atomic_write(thread_dir / "thread.json", json.dumps(sorted_msgs, indent=2, ensure_ascii=False))
+        from ssd.output import _atomic_write, format_markdown
+
+        _atomic_write(
+            thread_dir / "thread.json", json.dumps(sorted_msgs, indent=2, ensure_ascii=False)
+        )
         _atomic_write(thread_dir / "thread.md", format_markdown(sorted_msgs))
         write_cursor(thread_dir, max(m["ts"] for m in enriched))
         click.echo(f"  thread {parsed.thread_ts}: {len(enriched)} new replies")
@@ -124,6 +129,7 @@ def run_sync(
     enriched = api.enrich(channel_id, raw_msgs)
     if attachments_enabled and token:
         from ssd.attachments import download_attachments
+
         enriched = download_attachments(out_dir, enriched, token)
     merge_messages(out_dir, enriched)
     latest = max(m["ts"] for m in enriched)

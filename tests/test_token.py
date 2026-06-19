@@ -1,6 +1,8 @@
 import sqlite3
-import pytest
 from pathlib import Path
+
+import pytest
+
 import ssd.token as token_mod
 from ssd.token import extract_token
 
@@ -21,6 +23,7 @@ def _make_cookies_db(path: Path, value: str) -> None:
 def test_extract_cookie_from_slack_cookies_sqlite(tmp_path, monkeypatch):
     """_from_slack_cookies provides the xoxd- cookie, not the xoxc- token."""
     from ssd.token import extract_cookie
+
     db = tmp_path / "Cookies"
     _make_cookies_db(db, "xoxd-test-token-abc123")
     monkeypatch.setattr(token_mod, "COOKIES_PATH", db)

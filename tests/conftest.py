@@ -1,5 +1,6 @@
 import pytest
 from click.testing import CliRunner
+
 from ssd.cli import main
 
 
@@ -12,4 +13,5 @@ def runner():
 def invoke(runner):
     def _invoke(*args, **kwargs):
         return runner.invoke(main, args, catch_exceptions=False, **kwargs)
+
     return _invoke

@@ -1,9 +1,9 @@
 import re
 import time
-from typing import Optional
+from typing import Any
 from urllib.parse import quote, urlparse
-from slack_sdk import WebClient
 
+from slack_sdk import WebClient
 
 _ID_RE = re.compile(r"^[CDG][A-Z0-9a-z]+$")
 _MENTION_RE = re.compile(r"<@([A-Z0-9a-z]+)>")
@@ -17,7 +17,7 @@ def _url_encode_cookie(cookie: str) -> str:
 
 
 class SlackAPI:
-    def __init__(self, token: str, delay: float = 1.0, cookie: Optional[str] = None):
+    def __init__(self, token: str, delay: float = 1.0, cookie: str | None = None):
         # xoxc- tokens require the d cookie sent alongside; xoxd-/xoxb- work standalone
         headers = {"Cookie": f"d={_url_encode_cookie(cookie)}"} if cookie else {}
         self.client = WebClient(token=token, headers=headers)
@@ -53,7 +53,9 @@ class SlackAPI:
                 break
         raise ValueError(f"Channel not found: {name_or_id}")
 
-    def _paginate(self, sdk_method, base_kwargs: dict, oldest: str | None = None) -> list[dict]:
+    def _paginate(
+        self, sdk_method: Any, base_kwargs: dict[str, Any], oldest: str | None = None
+    ) -> list[dict[str, Any]]:
         items = []
         cursor = None
         while True:
@@ -72,16 +74,16 @@ class SlackAPI:
             time.sleep(self.delay)
         return items
 
-    def get_messages(
-        self, channel_id: str, oldest: Optional[str] = None
-    ) -> list[dict]:
+    def get_messages(self, channel_id: str, oldest: str | None = None) -> list[dict[str, Any]]:
         return self._paginate(
             self.client.conversations_history,
             {"channel": channel_id, "limit": 200},
             oldest=oldest,
         )
 
-    def get_replies(self, channel_id: str, thread_ts: str, oldest: Optional[str] = None) -> list[dict]:
+    def get_replies(
+        self, channel_id: str, thread_ts: str, oldest: str | None = None
+    ) -> list[dict[str, Any]]:
         raw = self._paginate(
             self.client.conversations_replies,
             {"channel": channel_id, "ts": thread_ts, "limit": 200},
@@ -104,7 +106,7 @@ class SlackAPI:
         self._user_cache[user_id] = name
         return name
 
-    def enrich_reply(self, r: dict) -> dict:
+    def enrich_reply(self, r: dict[str, Any]) -> dict[str, Any]:
         """Enrich a single reply dict — name resolution and mention substitution only,
         no recursive thread fetch (replies don't have sub-threads)."""
         user_id = r.get("user", "")
@@ -120,7 +122,7 @@ class SlackAPI:
             "files": r.get("files", []),
         }
 
-    def enrich(self, channel_id: str, messages: list[dict]) -> list[dict]:
+    def enrich(self, channel_id: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result = []
         for msg in messages:
             enriched = {**self.enrich_reply(msg), "thread": []}

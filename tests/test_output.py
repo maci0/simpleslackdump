@@ -1,13 +1,12 @@
 import json
-import pytest
-from pathlib import Path
+
 from ssd.output import (
     channel_dir,
-    write_messages,
+    format_markdown,
     merge_messages,
     read_cursor,
     write_cursor,
-    format_markdown,
+    write_messages,
 )
 
 MSG_A = {

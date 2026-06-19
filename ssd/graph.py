@@ -2,9 +2,10 @@ import json
 import re
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 
-def build_graph(dirs: list[Path]) -> dict:
+def build_graph(dirs: list[Path]) -> dict[str, Any]:
     """Build a user interaction graph from one or more channel message dirs.
 
     Reads each messages.json once, buffering (sender, text) pairs for the
@@ -90,9 +91,8 @@ def _mention_candidates(raw: str) -> list[str]:
     return candidates
 
 
-def render_html(graph: dict, title: str = "Communication Graph") -> str:
-    import json as _json
-    data_json = _json.dumps(graph)
+def render_html(graph: dict[str, Any], title: str = "Communication Graph") -> str:
+    data_json = json.dumps(graph)
     channels_str = ", ".join(graph["channels"]) if graph["channels"] else "unknown"
     n_nodes = len(graph["nodes"])
     n_links = len(graph["links"])

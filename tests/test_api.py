@@ -1,5 +1,7 @@
+from unittest.mock import MagicMock
+
 import pytest
-from unittest.mock import MagicMock, call, patch
+
 from ssd.api import SlackAPI
 
 
@@ -17,9 +19,7 @@ def test_get_workspace(mock_client):
 
 
 def test_resolve_channel_by_id(mock_client):
-    mock_client.conversations_info.return_value = {
-        "channel": {"id": "C123", "name": "general"}
-    }
+    mock_client.conversations_info.return_value = {"channel": {"id": "C123", "name": "general"}}
     api = SlackAPI("xoxd-fake")
     cid, name = api.resolve_channel("C123")
     assert cid == "C123"
@@ -62,7 +62,7 @@ def test_get_user_name_cached(mock_client):
     }
     api = SlackAPI("xoxd-fake")
     name1 = api.get_user_name("U001")
-    name2 = api.get_user_name("U001")
+    api.get_user_name("U001")
     assert name1 == "alice"
     assert mock_client.users_info.call_count == 1  # cached
 
@@ -100,7 +100,7 @@ def test_get_replies_passes_oldest(mock_client):
         "response_metadata": {"next_cursor": ""},
     }
     api = SlackAPI("xoxd-fake", delay=0)
-    replies = api.get_replies("C123", "1.0", oldest="1.2")
+    api.get_replies("C123", "1.0", oldest="1.2")
     call_kwargs = mock_client.conversations_replies.call_args[1]
     assert call_kwargs.get("oldest") == "1.2"
 

@@ -1,9 +1,10 @@
 import json
-import pytest
 from unittest.mock import MagicMock
-from pathlib import Path
+
+import pytest
+
+from ssd.output import channel_dir, write_cursor, write_messages
 from ssd.sync import run_sync
-from ssd.output import channel_dir, write_messages, write_cursor
 
 
 @pytest.fixture

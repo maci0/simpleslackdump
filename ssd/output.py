@@ -1,19 +1,16 @@
 import json
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 
-def channel_dir(
-    output_root: str, workspace: str, channel_name: str, channel_id: str
-) -> Path:
+def channel_dir(output_root: str, workspace: str, channel_name: str, channel_id: str) -> Path:
     return Path(output_root) / workspace / f"{channel_name}_{channel_id}"
 
 
 def _ts_to_dt(ts: str) -> datetime:
-    return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+    return datetime.fromtimestamp(float(ts), tz=UTC)
 
 
 def _file_link_lines(files: list[dict], prefix: str = "") -> list[str]:
@@ -61,6 +58,7 @@ def _atomic_write(path: Path, content: str) -> None:
             os.unlink(tmp)
         except OSError:
             import warnings
+
             warnings.warn(f"Could not clean up temp file: {tmp}", RuntimeWarning, stacklevel=2)
         raise
 
@@ -86,7 +84,7 @@ def merge_messages(dir: Path, new_messages: list[dict]) -> list[dict]:
     return sorted(by_ts.values(), key=lambda m: float(m["ts"]))
 
 
-def read_cursor(dir: Path) -> Optional[str]:
+def read_cursor(dir: Path) -> str | None:
     cursor_path = dir / ".cursor"
     if not cursor_path.exists():
         return None

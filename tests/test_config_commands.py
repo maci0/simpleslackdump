@@ -1,8 +1,8 @@
-import pytest
-import json
-from pathlib import Path
-from click.testing import CliRunner
 from unittest.mock import MagicMock, patch
+
+import pytest
+from click.testing import CliRunner
+
 from ssd.cli import main
 
 
@@ -36,6 +36,7 @@ def test_add_channel_url(tmp_path, runner):
             )
     assert result.exit_code == 0
     from ssd.config import load_config
+
     cfg = load_config(config)
     assert len(cfg.channels) == 1
     assert cfg.channels[0].id == "C123"
@@ -43,18 +44,23 @@ def test_add_channel_url(tmp_path, runner):
 
 def test_remove_channel(tmp_path, runner):
     from ssd.config import add_channel
+
     config = tmp_path / "ssd.toml"
     add_channel(config, id="C123", name="general", url="https://...", since=None)
     with patch("ssd.cli._get_token", return_value="xoxd-fake"):
-        result = invoke(runner, "remove", "C123", config_path=config, output_path=tmp_path / "output")
+        result = invoke(
+            runner, "remove", "C123", config_path=config, output_path=tmp_path / "output"
+        )
     assert result.exit_code == 0
     from ssd.config import load_config
+
     cfg = load_config(config)
     assert len(cfg.channels) == 0
 
 
 def test_list_shows_channels(tmp_path, runner):
     from ssd.config import add_channel
+
     config = tmp_path / "ssd.toml"
     add_channel(config, id="C123", name="general", url="https://...", since=None)
     result = invoke(runner, "list", config_path=config, output_path=tmp_path / "output")
@@ -65,14 +71,17 @@ def test_list_shows_channels(tmp_path, runner):
 
 def test_update_calls_sync_for_each_channel(tmp_path, runner):
     from ssd.config import add_channel
+
     config = tmp_path / "ssd.toml"
     add_channel(config, id="C123", name="general", url="https://...", since=None)
     add_channel(config, id="C456", name="random", url="https://...", since=None)
-    with patch("ssd.cli.run_sync") as mock_sync, \
-         patch("ssd.cli.SlackAPI") as MockAPI, \
-         patch("ssd.cli._get_token", return_value="xoxd-fake"):
+    with (
+        patch("ssd.cli.run_sync") as mock_sync,
+        patch("ssd.cli.SlackAPI") as MockAPI,
+        patch("ssd.cli._get_token", return_value="xoxd-fake"),
+    ):
         mock_api = MagicMock()
         MockAPI.return_value = mock_api
         mock_api.get_workspace.return_value = "testteam"
-        result = invoke(runner, "update", config_path=config, output_path=tmp_path / "output")
+        invoke(runner, "update", config_path=config, output_path=tmp_path / "output")
     assert mock_sync.call_count == 2

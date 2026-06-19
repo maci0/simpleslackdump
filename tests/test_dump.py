@@ -1,7 +1,8 @@
-import pytest
-from unittest.mock import MagicMock, patch
-from pathlib import Path
 import json
+from unittest.mock import MagicMock
+
+import pytest
+
 from ssd.dump import run_dump
 
 
@@ -58,8 +59,12 @@ def test_run_dump_thread_url(tmp_path, mock_api):
     raw_reply = {"ts": "1.1", "user": "U2", "text": "reply", "reactions": [], "files": []}
     mock_api.get_replies.return_value = [raw_reply]
     mock_api.enrich_reply.return_value = {
-        "ts": "1.1", "user": "U2", "user_name": "bob",
-        "text": "reply", "reactions": [], "files": [],
+        "ts": "1.1",
+        "user": "U2",
+        "user_name": "bob",
+        "text": "reply",
+        "reactions": [],
+        "files": [],
     }
     run_dump(
         mock_api,

@@ -1,14 +1,13 @@
 import re
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
 class SlackTarget:
-    channel_id: Optional[str] = None
-    channel_name: Optional[str] = None
-    workspace: Optional[str] = None
-    thread_ts: Optional[str] = None
+    channel_id: str | None = None
+    channel_name: str | None = None
+    workspace: str | None = None
+    thread_ts: str | None = None
 
 
 def parse_target(target: str) -> SlackTarget:
@@ -36,6 +35,7 @@ def parse_target(target: str) -> SlackTarget:
 
     # Bare Slack ID (C, D, G prefix)
     from ssd.api import _ID_RE
+
     if _ID_RE.match(target):
         return SlackTarget(channel_id=target)
 

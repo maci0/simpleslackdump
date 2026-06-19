@@ -3,7 +3,6 @@ import re
 import sqlite3
 import subprocess
 from pathlib import Path
-from typing import Optional
 from urllib.parse import unquote
 
 COOKIES_PATH = Path.home() / "Library/Application Support/Slack/Cookies"
@@ -15,7 +14,7 @@ _TOKEN_RE = re.compile(rb"(xox[bcps]-[A-Za-z0-9\-]+)")
 _COOKIE_RE = re.compile(rb"xox[a-z]+-[A-Za-z0-9%\-]+")
 
 
-def _from_slack_cookies() -> Optional[str]:
+def _from_slack_cookies() -> str | None:
     """Read plaintext d cookie from Slack's own SQLite Cookies file (older Slack/Electron)."""
     if not COOKIES_PATH.exists():
         return None
@@ -32,11 +31,12 @@ def _from_slack_cookies() -> Optional[str]:
     return None
 
 
-def _from_leveldb() -> Optional[str]:
+def _from_leveldb() -> str | None:
     if not LEVELDB_PATH.exists():
         return None
     try:
         import plyvel
+
         db = plyvel.DB(str(LEVELDB_PATH))
         try:
             for _, value in db:
@@ -50,11 +50,11 @@ def _from_leveldb() -> Optional[str]:
     return None
 
 
-def _from_raw_scan() -> Optional[str]:
+def _from_raw_scan() -> str | None:
     """Scan LevelDB .ldb/.log files for xoxc token (longest match wins)."""
     if not LEVELDB_PATH.exists():
         return None
-    best: Optional[str] = None
+    best: str | None = None
     for path in sorted(LEVELDB_PATH.iterdir()):
         if path.suffix not in (".ldb", ".log"):
             continue
@@ -69,16 +69,14 @@ def _from_raw_scan() -> Optional[str]:
     return best
 
 
-def _chrome_d_cookie() -> Optional[str]:
+def _chrome_d_cookie() -> str | None:
     """Decrypt the Slack 'd' cookie from Chrome's SQLite Cookies using Chrome Safe Storage key.
 
     Chrome encrypts cookies with AES-128-CBC using a PBKDF2-derived key stored in the
     macOS Keychain under 'Chrome Safe Storage'. The cookie value is URL-encoded in the
     plaintext and may contain %2F (/) and %2B (+) characters.
     """
-    chrome_cookies = (
-        Path.home() / "Library/Application Support/Google/Chrome/Default/Cookies"
-    )
+    chrome_cookies = Path.home() / "Library/Application Support/Google/Chrome/Default/Cookies"
     if not chrome_cookies.exists():
         return None
     try:
@@ -86,7 +84,15 @@ def _chrome_d_cookie() -> Optional[str]:
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
         key_raw = subprocess.run(
-            ["security", "find-generic-password", "-w", "-s", "Chrome Safe Storage", "-a", "Chrome"],
+            [
+                "security",
+                "find-generic-password",
+                "-w",
+                "-s",
+                "Chrome Safe Storage",
+                "-a",
+                "Chrome",
+            ],
             capture_output=True,
             timeout=5,
         ).stdout.strip()
@@ -130,12 +136,10 @@ def extract_token() -> str:
         result = method()
         if result:
             return result
-    raise RuntimeError(
-        "Could not extract Slack token. Is Slack installed and have you logged in?"
-    )
+    raise RuntimeError("Could not extract Slack token. Is Slack installed and have you logged in?")
 
 
-def _from_firefox_cookies() -> Optional[str]:
+def _from_firefox_cookies() -> str | None:
     """Read the Slack 'd' cookie from Firefox's unencrypted cookies.sqlite.
 
     Firefox stores cookie values in plaintext in moz_cookies, unlike Chrome which
@@ -164,7 +168,7 @@ def _from_firefox_cookies() -> Optional[str]:
     return None
 
 
-def extract_cookie() -> Optional[str]:
+def extract_cookie() -> str | None:
     """Return the URL-decoded xoxd- cookie value needed alongside the xoxc- token.
 
     Newer Slack (Electron) requires both:

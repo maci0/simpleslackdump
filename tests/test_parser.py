@@ -1,5 +1,4 @@
-import pytest
-from ssd.parser import parse_target, SlackTarget
+from ssd.parser import parse_target
 
 
 def test_parse_channel_url():
@@ -11,9 +10,7 @@ def test_parse_channel_url():
 
 
 def test_parse_thread_url():
-    t = parse_target(
-        "https://acme.enterprise.slack.com/archives/C0BAF26EJ2Z/p1234567890123456"
-    )
+    t = parse_target("https://acme.enterprise.slack.com/archives/C0BAF26EJ2Z/p1234567890123456")
     assert t.channel_id == "C0BAF26EJ2Z"
     assert t.thread_ts == "1234567890.123456"
     assert t.workspace == "acme.enterprise"
