@@ -134,6 +134,35 @@ def extract_token() -> str:
     )
 
 
+def _from_firefox_cookies() -> Optional[str]:
+    """Read the Slack 'd' cookie from Firefox's unencrypted cookies.sqlite.
+
+    Firefox stores cookie values in plaintext in moz_cookies, unlike Chrome which
+    encrypts them. Tries all profiles; returns first match.
+    """
+    profiles_dir = Path.home() / "Library/Application Support/Firefox/Profiles"
+    if not profiles_dir.exists():
+        return None
+    for profile in profiles_dir.iterdir():
+        if not profile.is_dir():
+            continue
+        cookies_db = profile / "cookies.sqlite"
+        if not cookies_db.exists():
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{cookies_db}?mode=ro", uri=True)
+            row = conn.execute(
+                "SELECT value FROM moz_cookies WHERE host LIKE '%slack.com' AND name = 'd'"
+            ).fetchone()
+            conn.close()
+            if row and row[0]:
+                val = row[0]
+                return unquote(val) if "%" in val else val
+        except Exception:
+            continue
+    return None
+
+
 def extract_cookie() -> Optional[str]:
     """Return the URL-decoded xoxd- cookie value needed alongside the xoxc- token.
 
@@ -141,11 +170,11 @@ def extract_cookie() -> Optional[str]:
       Authorization: Bearer xoxc-...
       Cookie: d=<xoxd-...URL-encoded>
 
-    Tries the Slack app's own SQLite Cookies file first (older Slack with plaintext
-    cookies), then falls back to Chrome's encrypted cookie store.
+    Tries in order: Slack's own Cookies file (older Slack, plaintext),
+    Firefox cookies.sqlite (plaintext), Chrome's encrypted cookie store.
     """
-    # Older Slack stores the d cookie in plaintext in its own Cookies SQLite file
-    slack_cookie = _from_slack_cookies()
-    if slack_cookie:
-        return slack_cookie
-    return _chrome_d_cookie()
+    for method in (_from_slack_cookies, _from_firefox_cookies, _chrome_d_cookie):
+        result = method()
+        if result:
+            return result
+    return None

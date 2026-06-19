@@ -5,7 +5,42 @@ from pathlib import Path
 from typing import Optional
 from ssd.api import SlackAPI
 from ssd.parser import parse_target
-from ssd.output import channel_dir, read_cursor, write_cursor, merge_messages
+from ssd.output import channel_dir, read_cursor, write_cursor, write_messages, merge_messages
+
+
+def _refresh_old_threads(
+    api: SlackAPI, channel_id: str, out_dir: Path, cursor_ts: str
+) -> None:
+    """Fetch new replies for threads on messages older than cursor_ts.
+
+    conversations_history with oldest= misses replies added to pre-cursor messages.
+    This closes that gap by polling each known thread for replies newer than the
+    last reply we already have.
+    """
+    messages_path = out_dir / "messages.json"
+    if not messages_path.exists():
+        return
+    stored: list[dict] = json.loads(messages_path.read_text())
+    refreshed = 0
+    for msg in stored:
+        # Skip messages at or after the cursor — already enriched in this run
+        if msg["ts"] >= cursor_ts:
+            continue
+        thread = msg.get("thread")
+        if not thread:
+            continue
+        latest_reply_ts = max(r["ts"] for r in thread)
+        new_raw = api.get_replies(channel_id, msg["ts"], oldest=latest_reply_ts)
+        # oldest= is inclusive; skip the reply we already have
+        new_raw = [r for r in new_raw if r["ts"] > latest_reply_ts]
+        if not new_raw:
+            continue
+        msg["thread"].extend(api.enrich_reply(r) for r in new_raw)
+        msg["thread"].sort(key=lambda r: float(r["ts"]))
+        refreshed += 1
+    if refreshed:
+        write_messages(out_dir, stored)
+        click.echo(f"  {refreshed} threads refreshed with new replies")
 
 
 def _since_to_ts(since: str) -> str:
@@ -86,3 +121,10 @@ def run_sync(
     latest = max(m["ts"] for m in enriched)
     write_cursor(out_dir, latest)
     click.echo(f"  {len(enriched)} new messages merged")
+
+    # conversations_history with oldest= never returns thread replies for messages
+    # older than the cursor. Scan all stored threads for new replies explicitly.
+    # Only check threads for messages older than the cursor — newer messages were
+    # just enriched above and already have current replies.
+    if oldest:
+        _refresh_old_threads(api, channel_id, out_dir, oldest)

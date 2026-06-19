@@ -24,7 +24,8 @@ def test_extract_cookie_from_slack_cookies_sqlite(tmp_path, monkeypatch):
     db = tmp_path / "Cookies"
     _make_cookies_db(db, "xoxd-test-token-abc123")
     monkeypatch.setattr(token_mod, "COOKIES_PATH", db)
-    # patch Chrome path to non-existent so it falls through to Slack cookies
+    # stub out Firefox and Chrome so only Slack's own Cookies file is tried
+    monkeypatch.setattr(token_mod, "_from_firefox_cookies", lambda: None)
     monkeypatch.setattr(token_mod, "_chrome_d_cookie", lambda: None)
     assert extract_cookie() == "xoxd-test-token-abc123"
 

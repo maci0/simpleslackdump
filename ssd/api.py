@@ -108,6 +108,22 @@ class SlackAPI:
         self._user_cache[user_id] = name
         return name
 
+    def enrich_reply(self, r: dict) -> dict:
+        """Enrich a single reply dict — name resolution and mention substitution only,
+        no recursive thread fetch (replies don't have sub-threads)."""
+        user_id = r.get("user", "")
+        return {
+            "ts": r["ts"],
+            "user": user_id,
+            "user_name": self.get_user_name(user_id) if user_id else "unknown",
+            "text": self.resolve_mentions(r.get("text", "")),
+            "reactions": [
+                {"name": rx["name"], "count": rx["count"], "users": rx.get("users", [])}
+                for rx in r.get("reactions", [])
+            ],
+            "files": r.get("files", []),
+        }
+
     def enrich(self, channel_id: str, messages: list[dict]) -> list[dict]:
         result = []
         for msg in messages:
@@ -126,21 +142,6 @@ class SlackAPI:
             }
             if msg.get("reply_count", 0) > 0:
                 raw_replies = self.get_replies(channel_id, msg["ts"])
-                enriched["thread"] = [
-                    {
-                        "ts": r["ts"],
-                        "user": r.get("user", ""),
-                        "user_name": (
-                            self.get_user_name(r["user"]) if r.get("user") else "unknown"
-                        ),
-                        "text": self.resolve_mentions(r.get("text", "")),
-                        "reactions": [
-                            {"name": rx["name"], "count": rx["count"], "users": rx.get("users", [])}
-                            for rx in r.get("reactions", [])
-                        ],
-                        "files": r.get("files", []),
-                    }
-                    for r in raw_replies
-                ]
+                enriched["thread"] = [self.enrich_reply(r) for r in raw_replies]
             result.append(enriched)
         return result

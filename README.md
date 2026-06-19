@@ -18,11 +18,11 @@ Dump Slack channels and threads to JSON and Markdown. No OAuth setup. No bot tok
 |---|---|
 | macOS | Token extraction reads Slack's local app data |
 | [Slack desktop app](https://slack.com/downloads/mac), signed in | Source of the `xoxc-` API token |
-| [Google Chrome](https://www.google.com/chrome/), signed into Slack | Source of the session cookie (`xoxd-`) |
+| Chrome or Firefox, signed into Slack | Source of the session cookie (`xoxd-`) |
 | Python 3.11+ | Runtime |
 | [uv](https://docs.astral.sh/uv/) | Dependency/tool management |
 
-Chrome must be signed into the **same workspace** as the desktop app.
+Chrome or Firefox must be signed into the **same workspace** as the desktop app.
 
 ## Install
 
@@ -83,7 +83,7 @@ ssd sync "#general" --since 2024-06-01
 ssd sync "#general" --since 1717200000
 ```
 
-New messages merge into existing `messages.json` — no duplicates, no overwrites.
+New messages merge into existing `messages.json` — no duplicates, no overwrites. New replies to older messages are also picked up (each known thread is polled for replies newer than the last stored reply).
 
 ## Track channels with ssd.toml
 
@@ -187,7 +187,7 @@ Commands:
 `ssd token` runs once to save credentials locally:
 
 1. Finds the `xoxc-` token in Slack's LevelDB (`~/Library/Application Support/Slack/Local Storage/leveldb/`)
-2. Decrypts the `d` session cookie from Chrome's SQLite cookie store (using the `Chrome Safe Storage` key from macOS Keychain)
+2. Extracts the `d` session cookie — tries in order: Slack's own Cookies file (older Slack), Firefox `cookies.sqlite` (plaintext), Chrome's SQLite store (AES-decrypted via macOS Keychain)
 3. Saves both to `output/.token` and `output/.cookie` (permissions `600`)
 
 Every API call sends `Authorization: Bearer xoxc-...` and `Cookie: d=xoxd-...`. This is how the Slack Electron desktop app itself authenticates — no API keys needed.
@@ -196,11 +196,7 @@ Re-run `ssd token` if commands return `invalid_auth` (e.g. after signing out and
 
 ## Known limitations
 
-- **Replies to old messages are not picked up by incremental sync.** `ssd sync` uses `conversations.history` with an `oldest=` cursor, which only returns top-level messages. If someone replies to a message from before the cursor, that reply is invisible to sync. Run a full `ssd dump` periodically to catch these, or re-dump individual threads with `ssd dump <thread_url>`.
-
-- **Chrome must be running and signed into Slack** for cookie extraction to work. If Chrome is not present, `ssd token` will save the `xoxc-` token but no cookie — API calls will fail with `invalid_auth` on newer Slack.
-
-- **macOS only.** Token and cookie extraction reads macOS-specific paths (`~/Library/Application Support/Slack/` and `~/Library/Application Support/Google/Chrome/`).
+- **macOS only.** Token and cookie extraction reads macOS-specific paths (`~/Library/Application Support/Slack/`, Chrome, and Firefox profile dirs).
 
 ## Troubleshooting
 
@@ -208,7 +204,7 @@ Re-run `ssd token` if commands return `invalid_auth` (e.g. after signing out and
 Re-run `ssd token`. The session may have expired or Chrome may not have been open when credentials were extracted.
 
 **`ssd token` prints "Warning: could not extract d cookie":**
-Make sure Chrome is open and signed into the same Slack workspace. Then re-run `ssd token`.
+Make sure Chrome or Firefox is open and signed into the same Slack workspace. Then re-run `ssd token`.
 
 **Channel not found when using `ssd dump #name`:**
 Use the channel URL or bare ID instead. Name-based lookup pages through `conversations.list` which may time out on large workspaces.
