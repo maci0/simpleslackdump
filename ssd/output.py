@@ -1,4 +1,6 @@
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -48,16 +50,30 @@ def format_markdown(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _atomic_write(path: Path, content: str) -> None:
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_messages(dir: Path, messages: list[dict]) -> None:
     dir.mkdir(parents=True, exist_ok=True)
     sorted_msgs = sorted(messages, key=lambda m: float(m["ts"]))
-    (dir / "messages.json").write_text(
-        json.dumps(sorted_msgs, indent=2, ensure_ascii=False)
-    )
-    (dir / "messages.md").write_text(format_markdown(sorted_msgs))
+    json_path = dir / "messages.json"
+    md_path = dir / "messages.md"
+    _atomic_write(json_path, json.dumps(sorted_msgs, indent=2, ensure_ascii=False))
+    _atomic_write(md_path, format_markdown(sorted_msgs))
 
 
-def merge_messages(dir: Path, new_messages: list[dict]) -> None:
+def merge_messages(dir: Path, new_messages: list[dict]) -> list[dict]:
     json_path = dir / "messages.json"
     existing: list[dict] = []
     if json_path.exists():
@@ -66,6 +82,7 @@ def merge_messages(dir: Path, new_messages: list[dict]) -> None:
     for m in new_messages:
         by_ts[m["ts"]] = m
     write_messages(dir, list(by_ts.values()))
+    return sorted(by_ts.values(), key=lambda m: float(m["ts"]))
 
 
 def read_cursor(dir: Path) -> Optional[str]:

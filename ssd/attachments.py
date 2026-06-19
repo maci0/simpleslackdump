@@ -1,5 +1,14 @@
+import re as _re
 import requests
 from pathlib import Path
+
+
+def _safe_name(name: str) -> str:
+    """Strip path separators and leading dots from Slack filenames."""
+    # Replace any path separator or null byte with underscore
+    safe = _re.sub(r'[/\\:\x00]', '_', name)
+    # Prevent hidden files and relative path escape
+    return safe.lstrip('.') or "file"
 
 
 def _download_file(url: str, dest: Path, size: int | None, token: str) -> str:
@@ -23,7 +32,8 @@ def _download_file(url: str, dest: Path, size: int | None, token: str) -> str:
 def _enrich_file(f: dict, ts: str, att_dir: Path, token: str) -> dict:
     """Resolve one Slack file object to an enriched dict with local_path set."""
     url = f.get("url_private_download") or f.get("url_private") or ""
-    name = f.get("name") or f.get("title") or f.get("id") or "unknown"
+    raw_name = f.get("name") or f.get("title") or f.get("id") or "unknown"
+    name = _safe_name(raw_name)
     if not url:
         return {"name": name, "url": "", "local_path": "", "mimetype": f.get("mimetype", ""), "size": 0}
     att_dir.mkdir(parents=True, exist_ok=True)

@@ -31,7 +31,7 @@ def token(ctx):
     from ssd.token import extract_token, extract_cookie
 
     tok = extract_token()
-    click.echo(tok)
+    click.echo(tok, err=True)
     out = Path(ctx.obj["output"])
     out.mkdir(parents=True, exist_ok=True)
     token_path = out / ".token"

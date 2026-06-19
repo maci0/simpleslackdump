@@ -35,7 +35,8 @@ def _refresh_old_threads(
         new_raw = [r for r in new_raw if r["ts"] > latest_reply_ts]
         if not new_raw:
             continue
-        msg["thread"].extend(api.enrich_reply(r) for r in new_raw)
+        new_enriched = [api.enrich_reply(r) for r in new_raw]  # collect fully before mutating
+        msg["thread"].extend(new_enriched)
         msg["thread"].sort(key=lambda r: float(r["ts"]))
         refreshed += 1
     if refreshed:

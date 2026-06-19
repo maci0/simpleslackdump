@@ -38,12 +38,13 @@ def _from_leveldb() -> Optional[str]:
     try:
         import plyvel
         db = plyvel.DB(str(LEVELDB_PATH))
-        for _, value in db:
-            m = _TOKEN_RE.search(value)
-            if m:
-                db.close()
-                return m.group(1).decode()
-        db.close()
+        try:
+            for _, value in db:
+                m = _TOKEN_RE.search(value)
+                if m:
+                    return m.group(1).decode()
+        finally:
+            db.close()
     except Exception:
         pass
     return None

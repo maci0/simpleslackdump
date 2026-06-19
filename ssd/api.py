@@ -66,7 +66,9 @@ class SlackAPI:
             items.extend(resp["messages"])
             if not resp.get("has_more"):
                 break
-            cursor = resp["response_metadata"]["next_cursor"]
+            cursor = resp.get("response_metadata", {}).get("next_cursor", "")
+            if not cursor:
+                break
             time.sleep(self.delay)
         return items
 
