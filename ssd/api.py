@@ -6,6 +6,7 @@ from slack_sdk import WebClient
 
 
 _ID_RE = re.compile(r"^[CDG][A-Z0-9a-z]+$")
+_MENTION_RE = re.compile(r"<@([A-Z0-9a-z]+)>")
 
 
 def _url_encode_cookie(cookie: str) -> str:
@@ -91,6 +92,10 @@ class SlackAPI:
             time.sleep(self.delay)
         return replies
 
+    def resolve_mentions(self, text: str) -> str:
+        """Replace <@UXXXXXXX> with @display_name."""
+        return _MENTION_RE.sub(lambda m: f"@{self.get_user_name(m.group(1))}", text)
+
     def get_user_name(self, user_id: str) -> str:
         if user_id in self._user_cache:
             return self._user_cache[user_id]
@@ -110,7 +115,7 @@ class SlackAPI:
                 "ts": msg["ts"],
                 "user": user_id,
                 "user_name": self.get_user_name(user_id) if user_id else "unknown",
-                "text": msg.get("text", ""),
+                "text": self.resolve_mentions(msg.get("text", "")),
                 "reactions": [
                     {"name": r["name"], "count": r["count"], "users": r.get("users", [])}
                     for r in msg.get("reactions", [])
@@ -126,7 +131,7 @@ class SlackAPI:
                         "user_name": (
                             self.get_user_name(r["user"]) if r.get("user") else "unknown"
                         ),
-                        "text": r.get("text", ""),
+                        "text": self.resolve_mentions(r.get("text", "")),
                         "reactions": [
                             {"name": rx["name"], "count": rx["count"], "users": rx.get("users", [])}
                             for rx in r.get("reactions", [])
