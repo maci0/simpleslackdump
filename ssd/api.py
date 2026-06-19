@@ -4,7 +4,7 @@ from typing import Optional
 from slack_sdk import WebClient
 
 
-_ID_RE = re.compile(r"^[CDG][A-Z0-9]+$")
+_ID_RE = re.compile(r"^[CDG][A-Z0-9a-z]+$")
 
 
 class SlackAPI:
@@ -41,7 +41,7 @@ class SlackAPI:
         cursor = None
         while True:
             kwargs: dict = dict(channel=channel_id, limit=200)
-            if oldest:
+            if oldest is not None:
                 kwargs["oldest"] = oldest
             if cursor:
                 kwargs["cursor"] = cursor
