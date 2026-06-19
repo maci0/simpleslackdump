@@ -67,7 +67,18 @@ def _load_token(output_root: str) -> str | None:
 @click.pass_context
 def sync(ctx, targets, since, delay):
     """Incremental sync of channel(s)."""
-    click.echo("sync: not yet implemented")
+    from ssd.token import extract_token
+    from ssd.api import SlackAPI
+    from ssd.sync import run_sync
+
+    token = ctx.obj["token"] or _load_token(ctx.obj["output"])
+    if not token:
+        token = extract_token()
+    api = SlackAPI(token, delay=delay)
+    workspace = api.get_workspace()
+    for target in targets:
+        click.echo(f"Syncing {target}...")
+        run_sync(api, workspace, target, ctx.obj["output"], since=since)
 
 
 @main.command()
