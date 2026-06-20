@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import re
 import sqlite3
@@ -21,11 +22,10 @@ def _from_slack_cookies() -> str | None:
     if not COOKIES_PATH.exists():
         return None
     try:
-        conn = sqlite3.connect(f"file:{COOKIES_PATH}?mode=ro", uri=True)
-        row = conn.execute(
-            "SELECT value FROM cookies WHERE host_key = '.slack.com' AND name = 'd'"
-        ).fetchone()
-        conn.close()
+        with contextlib.closing(sqlite3.connect(f"file:{COOKIES_PATH}?mode=ro", uri=True)) as conn:
+            row = conn.execute(
+                "SELECT value FROM cookies WHERE host_key = '.slack.com' AND name = 'd'"
+            ).fetchone()
         if row and row[0]:
             return row[0]
     except Exception:
@@ -105,11 +105,11 @@ def _chrome_d_cookie() -> str | None:
         if not key_raw:
             return None
 
-        conn = sqlite3.connect(f"file:{chrome_cookies}?mode=ro", uri=True)
-        row = conn.execute(
-            "SELECT encrypted_value FROM cookies WHERE host_key = '.slack.com' AND name = 'd'"
-        ).fetchone()
-        conn.close()
+        db_url = f"file:{chrome_cookies}?mode=ro"
+        with contextlib.closing(sqlite3.connect(db_url, uri=True)) as conn:
+            row = conn.execute(
+                "SELECT encrypted_value FROM cookies WHERE host_key = '.slack.com' AND name = 'd'"
+            ).fetchone()
         if not row:
             return None
 
@@ -161,11 +161,11 @@ def _from_firefox_cookies() -> str | None:
         if not cookies_db.exists():
             continue
         try:
-            conn = sqlite3.connect(f"file:{cookies_db}?mode=ro", uri=True)
-            row = conn.execute(
-                "SELECT value FROM moz_cookies WHERE host LIKE '%slack.com' AND name = 'd'"
-            ).fetchone()
-            conn.close()
+            db_url = f"file:{cookies_db}?mode=ro"
+            with contextlib.closing(sqlite3.connect(db_url, uri=True)) as conn:
+                row = conn.execute(
+                    "SELECT value FROM moz_cookies WHERE host LIKE '%slack.com' AND name = 'd'"
+                ).fetchone()
             if row and row[0]:
                 val = row[0]
                 return unquote(val) if "%" in val else val

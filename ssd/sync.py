@@ -150,7 +150,7 @@ def run_sync(
     # since= is a floor — use the later of cursor vs floor so we never
     # re-fetch messages already captured, but never go older than the floor.
     if since_ts and cursor_ts:
-        oldest = since_ts if since_ts > cursor_ts else cursor_ts
+        oldest = since_ts if float(since_ts) > float(cursor_ts) else cursor_ts
     else:
         oldest = cursor_ts or since_ts
 

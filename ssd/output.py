@@ -73,16 +73,15 @@ def write_messages(dir: Path, messages: list[dict[str, Any]]) -> None:
     _atomic_write(md_path, format_markdown(sorted_msgs))
 
 
-def merge_messages(dir: Path, new_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def merge_messages(dir: Path, new_messages: list[dict[str, Any]]) -> None:
     json_path = dir / "messages.json"
     existing: list[dict[str, Any]] = []
     if json_path.exists():
         existing = json.loads(json_path.read_text())
-    by_ts: dict[str, dict] = {m["ts"]: m for m in existing}
+    by_ts: dict[str, dict[str, Any]] = {m["ts"]: m for m in existing}
     for m in new_messages:
         by_ts[m["ts"]] = m
     write_messages(dir, list(by_ts.values()))
-    return sorted(by_ts.values(), key=lambda m: float(m["ts"]))
 
 
 def read_cursor(dir: Path) -> str | None:

@@ -193,7 +193,7 @@ Without arguments, discovers all channel directories under `--output` (default: 
 
 Opens in the browser. Nodes are users; edges represent message replies and mentions. Useful for mapping active communication patterns across a workspace.
 
-Note: edges (connections between users) are derived from channel message threads and @mentions. Standalone thread dumps (`thread_*/thread.json`) contribute to user activity counts but not to edges, since the original thread context is not stored in the thread file.
+Note: edges (connections between users) are derived from channel message threads and @mentions. Standalone thread dumps (`thread_*/thread.json`) contribute to user activity counts. Reply-to-author edges are not recorded (the original thread author is not stored in the thread file), but `@mentions` found in those replies do create edges.
 
 ## All options
 

@@ -84,15 +84,20 @@ def _get_cookie(ctx_obj: dict[str, Any]) -> str | None:
     return None
 
 
-def _make_api(ctx_obj: dict[str, Any], delay: float) -> tuple[SlackAPI, str, str, bool]:
+def _make_api(
+    ctx_obj: dict[str, Any],
+    delay: float,
+    cfg: Any = None,
+) -> tuple[SlackAPI, str, str, bool]:
     """Return (api, workspace, token, attach). Shared setup for dump/sync/update."""
     from ssd.config import load_config
 
+    if cfg is None:
+        cfg = load_config(Path(ctx_obj["config_path"]))
     token = _get_token(ctx_obj)
     cookie = _get_cookie(ctx_obj)
     api = SlackAPI(token, delay=delay, cookie=cookie)
     workspace = api.get_workspace()
-    cfg = load_config(Path(ctx_obj["config_path"]))
     attach = ctx_obj["attachments"]
     if attach is None:
         attach = cfg.settings.attachments
@@ -233,7 +238,7 @@ def update(ctx: click.Context, delay: float | None) -> None:
     if not cfg.channels and not cfg.threads:
         click.echo("Nothing tracked. Use: ssd add <url>")
         return
-    api, workspace, token, attach = _make_api(ctx.obj, delay)
+    api, workspace, token, attach = _make_api(ctx.obj, delay, cfg=cfg)
     for ch in cfg.channels:
         click.echo(f"Syncing #{ch.name}...")
         ch_attach = ch.attachments if ch.attachments is not None else attach

@@ -5,7 +5,7 @@ from typing import Any
 import click
 
 from ssd.api import SlackAPI
-from ssd.output import channel_dir, format_markdown, write_cursor, write_messages
+from ssd.output import _atomic_write, channel_dir, format_markdown, write_cursor, write_messages
 from ssd.parser import parse_target
 
 
@@ -41,10 +41,10 @@ def run_dump(
             by_ts[m["ts"]] = m
         sorted_msgs = sorted(by_ts.values(), key=lambda m: float(m["ts"]))
         thread_dir.mkdir(parents=True, exist_ok=True)
-        (thread_dir / "thread.json").write_text(
-            json.dumps(sorted_msgs, indent=2, ensure_ascii=False)
+        _atomic_write(
+            thread_dir / "thread.json", json.dumps(sorted_msgs, indent=2, ensure_ascii=False)
         )
-        (thread_dir / "thread.md").write_text(format_markdown(sorted_msgs))
+        _atomic_write(thread_dir / "thread.md", format_markdown(sorted_msgs))
         if enriched:
             write_cursor(thread_dir, max(m["ts"] for m in enriched))
         elapsed = time.monotonic() - t0

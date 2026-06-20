@@ -257,9 +257,13 @@ d3svg.on("click", clearHighlight);
 
 // ── Tooltip ──────────────────────────────────────────────────────────────────
 node.on("mousemove", (e,d) => {{
+  tooltip.innerHTML = '';
+  const nameEl = document.createElement('strong');
+  nameEl.textContent = d.id;
+  tooltip.appendChild(nameEl);
   const out = links.filter(l=>(l.source.id??l.source)===d.id).length;
   const inn = links.filter(l=>(l.target.id??l.target)===d.id).length;
-  tooltip.innerHTML = `<strong>${{d.id}}</strong>Messages: ${{d.messages}}<br>Replies: ${{d.replies}}<br>Talks to: ${{out}} users<br>Talked to by: ${{inn}} users`;
+  tooltip.insertAdjacentHTML('beforeend', `<br>Messages: ${{d.messages}}<br>Replies: ${{d.replies}}<br>Talks to: ${{out}} users<br>Talked to by: ${{inn}} users`);
   tooltip.style.display="block";
   tooltip.style.left=(e.clientX+16)+"px";
   tooltip.style.top=(e.clientY-10)+"px";
