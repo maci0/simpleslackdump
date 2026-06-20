@@ -5,11 +5,26 @@ from pathlib import Path
 import click
 
 from ssd.api import SlackAPI
-from ssd.output import channel_dir, merge_messages, read_cursor, write_cursor, write_messages
+from ssd.output import (
+    _atomic_write,
+    channel_dir,
+    format_markdown,
+    merge_messages,
+    read_cursor,
+    write_cursor,
+    write_messages,
+)
 from ssd.parser import parse_target
 
 
-def _refresh_old_threads(api: SlackAPI, channel_id: str, out_dir: Path, cursor_ts: str) -> None:
+def _refresh_old_threads(
+    api: SlackAPI,
+    channel_id: str,
+    out_dir: Path,
+    cursor_ts: str,
+    token: str | None = None,
+    attachments_enabled: bool = False,
+) -> None:
     """Fetch new replies for threads on messages older than cursor_ts.
 
     conversations_history with oldest= misses replies added to pre-cursor messages.
@@ -35,6 +50,35 @@ def _refresh_old_threads(api: SlackAPI, channel_id: str, out_dir: Path, cursor_t
         if not new_raw:
             continue
         new_enriched = [api.enrich_reply(r) for r in new_raw]  # collect fully before mutating
+        if attachments_enabled and token:
+            from ssd.attachments import download_attachments
+
+            # Pass a fake message wrapper so download_attachments can process files
+            # Actually: enrich_reply returns reply dicts; we need to download their files
+            new_enriched = [
+                {**r, "files": []} if not r.get("files") else r
+                for r in new_enriched
+            ]
+            # download_attachments expects full messages but we have replies;
+            # wrap each as a standalone message for downloading
+            wrapped = [
+                {
+                    "ts": r["ts"],
+                    "user_name": r.get("user_name", ""),
+                    "text": r.get("text", ""),
+                    "reactions": [],
+                    "thread": [],
+                    "files": r.get("files", []),
+                }
+                for r in new_enriched
+            ]
+            downloaded = download_attachments(out_dir, wrapped, token)
+            # Merge file info back into new_enriched
+            file_map = {m["ts"]: m.get("files", []) for m in downloaded}
+            new_enriched = [
+                {**r, "files": file_map.get(r["ts"], r.get("files", []))}
+                for r in new_enriched
+            ]
         msg["thread"].extend(new_enriched)
         msg["thread"].sort(key=lambda r: float(r["ts"]))
         refreshed += 1
@@ -92,8 +136,6 @@ def run_sync(
         for m in enriched:
             by_ts[m["ts"]] = m
         sorted_msgs = sorted(by_ts.values(), key=lambda m: float(m["ts"]))
-        from ssd.output import _atomic_write, format_markdown
-
         _atomic_write(
             thread_dir / "thread.json", json.dumps(sorted_msgs, indent=2, ensure_ascii=False)
         )
@@ -141,4 +183,6 @@ def run_sync(
     # Only check threads for messages older than the cursor — newer messages were
     # just enriched above and already have current replies.
     if oldest:
-        _refresh_old_threads(api, channel_id, out_dir, oldest)
+        _refresh_old_threads(
+            api, channel_id, out_dir, oldest, token=token, attachments_enabled=attachments_enabled
+        )

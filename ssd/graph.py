@@ -4,6 +4,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+_MENTION_RE = re.compile(r"@(\S+)")
+
 
 def build_graph(dirs: list[Path]) -> dict[str, Any]:
     """Build a user interaction graph from one or more channel message dirs.
@@ -53,10 +55,9 @@ def build_graph(dirs: list[Path]) -> dict[str, Any]:
                     user_replies[replier] += 1
                     msg_texts.append((replier, r.get("text", "")))
 
-    all_users = frozenset(user_messages) | frozenset(user_replies) - {"unknown"}
+    all_users = (frozenset(user_messages) | frozenset(user_replies)) - {"unknown"}
 
     # Mention scan: regex extracts @word candidates, set lookup confirms known user
-    _MENTION_RE = re.compile(r"@(\S+)")
     for sender, text in msg_texts:
         if "@" not in text or sender == "unknown":
             continue

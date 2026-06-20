@@ -3,6 +3,7 @@ import os
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 
 def channel_dir(output_root: str, workspace: str, channel_name: str, channel_id: str) -> Path:
@@ -13,7 +14,7 @@ def _ts_to_dt(ts: str) -> datetime:
     return datetime.fromtimestamp(float(ts), tz=UTC)
 
 
-def _file_link_lines(files: list[dict], prefix: str = "") -> list[str]:
+def _file_link_lines(files: list[dict[str, Any]], prefix: str = "") -> list[str]:
     result = []
     for f in files:
         name = f.get("name") or "file"
@@ -26,7 +27,7 @@ def _file_link_lines(files: list[dict], prefix: str = "") -> list[str]:
     return result
 
 
-def format_markdown(messages: list[dict]) -> str:
+def format_markdown(messages: list[dict[str, Any]]) -> str:
     lines = []
     for msg in messages:
         dt = _ts_to_dt(msg["ts"])
@@ -63,7 +64,7 @@ def _atomic_write(path: Path, content: str) -> None:
         raise
 
 
-def write_messages(dir: Path, messages: list[dict]) -> None:
+def write_messages(dir: Path, messages: list[dict[str, Any]]) -> None:
     dir.mkdir(parents=True, exist_ok=True)
     sorted_msgs = sorted(messages, key=lambda m: float(m["ts"]))
     json_path = dir / "messages.json"
@@ -72,9 +73,9 @@ def write_messages(dir: Path, messages: list[dict]) -> None:
     _atomic_write(md_path, format_markdown(sorted_msgs))
 
 
-def merge_messages(dir: Path, new_messages: list[dict]) -> list[dict]:
+def merge_messages(dir: Path, new_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     json_path = dir / "messages.json"
-    existing: list[dict] = []
+    existing: list[dict[str, Any]] = []
     if json_path.exists():
         existing = json.loads(json_path.read_text())
     by_ts: dict[str, dict] = {m["ts"]: m for m in existing}
@@ -93,4 +94,4 @@ def read_cursor(dir: Path) -> str | None:
 
 def write_cursor(dir: Path, ts: str) -> None:
     dir.mkdir(parents=True, exist_ok=True)
-    (dir / ".cursor").write_text(ts)
+    _atomic_write(dir / ".cursor", ts)

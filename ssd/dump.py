@@ -1,5 +1,6 @@
 import json
 import time
+from typing import Any
 
 import click
 
@@ -30,7 +31,15 @@ def run_dump(
             from ssd.attachments import download_attachments
 
             enriched = download_attachments(thread_dir, enriched, token)
-        sorted_msgs = sorted(enriched, key=lambda m: float(m["ts"]))
+        # Merge with any previously synced replies (same logic as run_sync thread path)
+        existing_path = thread_dir / "thread.json"
+        existing: list[dict[str, Any]] = (
+            json.loads(existing_path.read_text()) if existing_path.exists() else []
+        )
+        by_ts = {m["ts"]: m for m in existing}
+        for m in enriched:
+            by_ts[m["ts"]] = m
+        sorted_msgs = sorted(by_ts.values(), key=lambda m: float(m["ts"]))
         thread_dir.mkdir(parents=True, exist_ok=True)
         (thread_dir / "thread.json").write_text(
             json.dumps(sorted_msgs, indent=2, ensure_ascii=False)

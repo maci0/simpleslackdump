@@ -65,7 +65,10 @@ class SlackAPI:
             if cursor:
                 kwargs["cursor"] = cursor
             resp = sdk_method(**kwargs)
-            items.extend(resp.get("messages") or [])
+            page = resp.get("messages")
+            if page is None:
+                break  # unexpected response shape — stop paginating rather than silently dropping
+            items.extend(page)
             if not resp.get("has_more"):
                 break
             cursor = resp.get("response_metadata", {}).get("next_cursor", "")

@@ -38,13 +38,17 @@ def _from_leveldb() -> str | None:
         import plyvel
 
         db = plyvel.DB(str(LEVELDB_PATH))
+        best: str | None = None
         try:
             for _, value in db:
                 m = _TOKEN_RE.search(value)
                 if m:
-                    return m.group(1).decode()
+                    tok = m.group(1).decode()
+                    if best is None or len(tok) > len(best):
+                        best = tok
         finally:
             db.close()
+        return best
     except Exception:
         pass
     return None

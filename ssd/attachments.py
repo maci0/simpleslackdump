@@ -58,9 +58,9 @@ def _enrich_file(f: dict[str, Any], ts: str, att_dir: Path, token: str) -> dict[
 
 
 def download_attachments(
-    dir: Path, messages: list[dict[str, Any]], token: str
+    out_dir: Path, messages: list[dict[str, Any]], token: str
 ) -> list[dict[str, Any]]:
-    att_dir = dir / "attachments"
+    att_dir = out_dir / "attachments"
     result = []
     for msg in messages:
         updated = dict(msg)

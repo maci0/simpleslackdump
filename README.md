@@ -184,7 +184,12 @@ Generate an HTML graph showing who talks to whom across one or more channel dump
 ssd graph output/myworkspace/general_C0XXXXXXXXX
 ssd graph output/myworkspace/general_C0XXXXXXXXX output/myworkspace/engineering_C0YYYYYYYYY
 ssd graph output/myworkspace/general_C0XXXXXXXXX --output graph.html
+
+# Auto-discover all channel dirs under the output directory
+ssd graph
 ```
+
+Without arguments, discovers all channel directories under `--output` (default: `./output`).
 
 Opens in the browser. Nodes are users; edges represent message replies and mentions. Useful for mapping active communication patterns across a workspace.
 
