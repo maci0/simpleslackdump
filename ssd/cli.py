@@ -101,7 +101,7 @@ def _make_api(ctx_obj: dict[str, Any], delay: float) -> tuple[SlackAPI, str, str
 
 @main.command()
 @click.argument("targets", nargs=-1, required=True)
-@click.option("--delay", default=None, show_default=True, type=float)
+@click.option("--delay", default=None, type=float, help="Override global --delay")
 @click.pass_context
 def dump(ctx: click.Context, targets: tuple[str, ...], delay: float | None) -> None:
     """Full history dump of channel(s)."""
@@ -117,7 +117,7 @@ def dump(ctx: click.Context, targets: tuple[str, ...], delay: float | None) -> N
 @main.command()
 @click.argument("targets", nargs=-1, required=True)
 @click.option("--since", default=None, help="YYYY-MM-DD or Unix timestamp")
-@click.option("--delay", default=None, show_default=True, type=float)
+@click.option("--delay", default=None, type=float, help="Override global --delay")
 @click.pass_context
 def sync(
     ctx: click.Context, targets: tuple[str, ...], since: str | None, delay: float | None
@@ -147,7 +147,6 @@ def add(ctx: click.Context, target: str) -> None:
     from ssd.parser import parse_target
 
     parsed = parse_target(target)
-    api = SlackAPI(_get_token(ctx.obj), cookie=_get_cookie(ctx.obj))
     config_path = Path(ctx.obj["config_path"])
 
     if parsed.thread_ts:
@@ -159,6 +158,7 @@ def add(ctx: click.Context, target: str) -> None:
         )
         click.echo(f"Added thread {parsed.thread_ts} in {parsed.channel_id}")
     else:
+        api = SlackAPI(_get_token(ctx.obj), cookie=_get_cookie(ctx.obj))
         if parsed.channel_id:
             cid, name = api.resolve_channel(parsed.channel_id)
         else:
@@ -222,7 +222,7 @@ def list_cmd(ctx: click.Context) -> None:
 
 
 @main.command()
-@click.option("--delay", default=None, show_default=True, type=float)
+@click.option("--delay", default=None, type=float, help="Override global --delay")
 @click.pass_context
 def update(ctx: click.Context, delay: float | None) -> None:
     """Sync all channels in ssd.toml."""

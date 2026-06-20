@@ -53,14 +53,7 @@ def _refresh_old_threads(
         if attachments_enabled and token:
             from ssd.attachments import download_attachments
 
-            # Pass a fake message wrapper so download_attachments can process files
-            # Actually: enrich_reply returns reply dicts; we need to download their files
-            new_enriched = [
-                {**r, "files": []} if not r.get("files") else r
-                for r in new_enriched
-            ]
-            # download_attachments expects full messages but we have replies;
-            # wrap each as a standalone message for downloading
+            # download_attachments expects message dicts; wrap each reply as a standalone message
             wrapped = [
                 {
                     "ts": r["ts"],
@@ -164,19 +157,18 @@ def run_sync(
     click.echo(f"  #{channel_name} ({channel_id}) oldest={oldest or 'all'} -> {out_dir}")
 
     raw_msgs = api.get_messages(channel_id, oldest=oldest)
-    if not raw_msgs:
-        click.echo("  no new messages")
-        return
+    if raw_msgs:
+        enriched = api.enrich(channel_id, raw_msgs)
+        if attachments_enabled and token:
+            from ssd.attachments import download_attachments
 
-    enriched = api.enrich(channel_id, raw_msgs)
-    if attachments_enabled and token:
-        from ssd.attachments import download_attachments
-
-        enriched = download_attachments(out_dir, enriched, token)
-    merge_messages(out_dir, enriched)
-    latest = max(m["ts"] for m in enriched)
-    write_cursor(out_dir, latest)
-    click.echo(f"  {len(enriched)} new messages merged")
+            enriched = download_attachments(out_dir, enriched, token)
+        merge_messages(out_dir, enriched)
+        latest = max(m["ts"] for m in enriched)
+        write_cursor(out_dir, latest)
+        click.echo(f"  {len(enriched)} new messages merged")
+    else:
+        click.echo("  no new top-level messages")
 
     # conversations_history with oldest= never returns thread replies for messages
     # older than the cursor. Scan all stored threads for new replies explicitly.

@@ -193,6 +193,8 @@ Without arguments, discovers all channel directories under `--output` (default: 
 
 Opens in the browser. Nodes are users; edges represent message replies and mentions. Useful for mapping active communication patterns across a workspace.
 
+Note: edges (connections between users) are derived from channel message threads and @mentions. Standalone thread dumps (`thread_*/thread.json`) contribute to user activity counts but not to edges, since the original thread context is not stored in the thread file.
+
 ## All options
 
 Options go **before** the subcommand:
@@ -204,7 +206,7 @@ Options:
   --token TEXT                  Override auto-extracted token (or SSD_TOKEN env var)
   --output DIR                  Output directory (default: ./output)
   --config FILE                 Config file (default: ./ssd.toml)
-  --delay FLOAT                 Seconds between paginated API calls (default: 1.0)
+  --delay FLOAT                 Seconds between paginated batch fetches (not applied to individual user lookups) (default: 1.0)
   --attachments / --no-attachments
 
 Commands:
@@ -223,7 +225,7 @@ Commands:
 `ssd token` runs once to save credentials locally:
 
 1. Finds the `xoxc-` token in Slack's LevelDB (`~/Library/Application Support/Slack/Local Storage/leveldb/`)
-2. Extracts the `d` session cookie — tries in order: Slack's own Cookies file (older Slack, plaintext), Firefox `cookies.sqlite` (plaintext), Chrome's SQLite store (AES-decrypted via macOS Keychain)
+2. Extracts the `d` session cookie — tries in order: Slack's own Cookies file (older Slack, plaintext), Firefox `cookies.sqlite` (plaintext), Chrome's SQLite store (AES-decrypted via macOS Keychain). Only the Default Chrome profile is searched (`~/Library/Application Support/Google/Chrome/Default/Cookies`). Chrome Beta, Canary, or non-default profiles are not tried.
 3. Saves both to `output/.token` and `output/.cookie` (permissions `600`)
 
 Every API call sends `Authorization: Bearer xoxc-...` and `Cookie: d=xoxd-...`. This is how the Slack Electron desktop app itself authenticates — no API keys needed.
