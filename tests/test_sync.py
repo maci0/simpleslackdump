@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from ssd.output import channel_dir, write_cursor, write_messages
-from ssd.sync import run_sync
+from ssd.sync import _since_to_ts, run_sync
 
 
 @pytest.fixture
@@ -134,3 +134,34 @@ def test_refresh_old_threads_picks_up_new_replies(tmp_path, mock_api):
     assert len(thread) == 2
     assert thread[-1]["ts"] == "1705320800.000000"
     assert thread[-1]["user_name"] == "carol"
+
+
+def test_since_to_ts_invalid_format_raises():
+    with pytest.raises(ValueError, match="Invalid --since"):
+        _since_to_ts("Jan 1 2024")
+
+
+def test_since_to_ts_iso_datetime_raises():
+    with pytest.raises(ValueError, match="Invalid --since"):
+        _since_to_ts("2024-01-01T12:00:00")
+
+
+def test_refresh_old_threads_skips_messages_with_empty_thread(tmp_path, mock_api):
+    """Messages with no prior thread replies are skipped — not a bug, a documented limitation."""
+    from ssd.output import channel_dir, write_messages
+    from ssd.sync import _refresh_old_threads
+
+    out_dir = channel_dir(str(tmp_path), "testteam", "general", "C123")
+    # Message with empty thread
+    write_messages(out_dir, [{
+        "ts": "1705320720.000000",
+        "user_name": "alice",
+        "text": "top msg",
+        "reactions": [], "files": [],
+        "thread": [],  # no prior replies
+    }])
+
+    mock_api.get_replies.return_value = []
+    _refresh_old_threads(mock_api, "C123", out_dir, "1705320750.000000")
+    # get_replies should not have been called for an empty thread
+    mock_api.get_replies.assert_not_called()

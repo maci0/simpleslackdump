@@ -4,6 +4,7 @@ import pytest
 from click.testing import CliRunner
 
 from ssd.cli import main
+from ssd.config import load_config
 
 
 @pytest.fixture
@@ -85,3 +86,22 @@ def test_update_calls_sync_for_each_channel(tmp_path, runner):
         mock_api.get_workspace.return_value = "testteam"
         invoke(runner, "update", config_path=config, output_path=tmp_path / "output")
     assert mock_sync.call_count == 2
+
+
+def test_add_thread_url_no_api_call(tmp_path, runner):
+    """Adding a thread URL writes a [[threads]] entry without making any API call."""
+    config = tmp_path / "ssd.toml"
+    with patch("ssd.cli.SlackAPI") as MockAPI:
+        result = invoke(
+            runner,
+            "add",
+            "https://testteam.slack.com/archives/C123/p1705320720000000",
+            config_path=config,
+            output_path=tmp_path / "output",
+        )
+    assert result.exit_code == 0
+    # No API should be constructed for a thread-only add
+    MockAPI.assert_not_called()
+    cfg = load_config(config)
+    assert len(cfg.threads) == 1
+    assert cfg.threads[0].thread_ts == "1705320720.000000"

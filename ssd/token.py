@@ -14,7 +14,7 @@ LEVELDB_PATH = Path.home() / "Library/Application Support/Slack/Local Storage/le
 # Add new Slack token prefixes here when Slack introduces them.
 _TOKEN_RE = re.compile(rb"(xox[bcps]-[A-Za-z0-9\-]+)")
 # Regex for URL-encoded cookie values (d cookie contains slashes encoded as %2F)
-_COOKIE_RE = re.compile(rb"xox[a-z]+-[A-Za-z0-9%\-]+")
+_COOKIE_RE = re.compile(rb"xoxd-[A-Za-z0-9%\-]+")
 
 
 def _from_slack_cookies() -> str | None:

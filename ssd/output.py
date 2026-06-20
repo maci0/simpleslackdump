@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -58,8 +59,6 @@ def _atomic_write(path: Path, content: str) -> None:
         try:
             os.unlink(tmp)
         except OSError:
-            import warnings
-
             warnings.warn(f"Could not clean up temp file: {tmp}", RuntimeWarning, stacklevel=2)
         raise
 

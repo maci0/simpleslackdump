@@ -68,3 +68,27 @@ def test_download_noop_for_messages_without_files(tmp_path):
         result = download_attachments(tmp_path, MESSAGES_NO_FILE, "xoxd-fake")
     mock_get.assert_not_called()
     assert result == MESSAGES_NO_FILE
+
+
+def test_safe_name_strips_dotdot():
+    from ssd.attachments import _safe_name
+    result = _safe_name("../../etc/passwd")
+    assert ".." not in result
+    assert "/" not in result
+
+
+def test_safe_name_null_byte():
+    from ssd.attachments import _safe_name
+    result = _safe_name("file\x00name.pdf")
+    assert "\x00" not in result
+
+
+def test_safe_name_single_dot_returns_file():
+    from ssd.attachments import _safe_name
+    # A lone "." becomes empty after lstrip("."), so "file" is returned
+    assert _safe_name(".") == "file"
+
+
+def test_safe_name_normal_name_unchanged():
+    from ssd.attachments import _safe_name
+    assert _safe_name("report.pdf") == "report.pdf"

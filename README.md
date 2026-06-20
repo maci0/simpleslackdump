@@ -91,7 +91,7 @@ ssd sync "#general" "#random"
 
 `--since` acts as a floor: messages older than this date are never re-fetched, but the cursor still advances normally as new messages arrive. If both a cursor and `--since` are set, the later of the two is used.
 
-New messages merge into existing `messages.json` — no duplicates, no overwrites. New replies to older messages are also picked up (each known thread is polled for replies newer than the last stored reply).
+New messages merge into existing `messages.json` — no duplicates, no overwrites. New replies to older messages are also picked up (each known thread is polled for replies newer than the last stored reply). Note: `ssd sync` on a channel also polls all known threads for new replies, which may make syncs slower on channels with many active threads.
 
 ## Track channels with ssd.toml
 
@@ -206,7 +206,7 @@ Options:
   --token TEXT                  Override auto-extracted token (or SSD_TOKEN env var)
   --output DIR                  Output directory (default: ./output)
   --config FILE                 Config file (default: ./ssd.toml)
-  --delay FLOAT                 Seconds between paginated batch fetches (not applied to individual user lookups) (default: 1.0)
+  --delay FLOAT                 Seconds between paginated batch fetches (not applied to individual API calls such as user lookups or per-thread reply fetches) (default: 1.0)
   --attachments / --no-attachments
 
 Commands:
@@ -225,7 +225,7 @@ Commands:
 `ssd token` runs once to save credentials locally:
 
 1. Finds the `xoxc-` token in Slack's LevelDB (`~/Library/Application Support/Slack/Local Storage/leveldb/`)
-2. Extracts the `d` session cookie — tries in order: Slack's own Cookies file (older Slack, plaintext), Firefox `cookies.sqlite` (plaintext), Chrome's SQLite store (AES-decrypted via macOS Keychain). Only the Default Chrome profile is searched (`~/Library/Application Support/Google/Chrome/Default/Cookies`). Chrome Beta, Canary, or non-default profiles are not tried.
+2. Extracts the `d` session cookie — tries in order: Slack's own Cookies file (older Slack, plaintext), Firefox `cookies.sqlite` (plaintext), Chrome's SQLite store (AES-decrypted via macOS Keychain). (Only the Default Chrome profile at `~/Library/Application Support/Google/Chrome/Default/` is searched; Beta, Canary, and custom profiles are not tried.)
 3. Saves both to `output/.token` and `output/.cookie` (permissions `600`)
 
 Every API call sends `Authorization: Bearer xoxc-...` and `Cookie: d=xoxd-...`. This is how the Slack Electron desktop app itself authenticates — no API keys needed.

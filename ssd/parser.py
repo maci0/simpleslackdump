@@ -13,7 +13,7 @@ class SlackTarget:
 def parse_target(target: str) -> SlackTarget:
     # Thread URL: .../archives/<CID>/p<10digits><6digits>
     m = re.match(
-        r"https?://([^/]+?)\.slack\.com/archives/([A-Z0-9]+)/p(\d{10})(\d{6})",
+        r"https?://([^/]+?)\.slack\.com/archives/([A-Z0-9a-z]+)/p(\d{10})(\d{6})",
         target,
     )
     if m:
@@ -26,7 +26,7 @@ def parse_target(target: str) -> SlackTarget:
 
     # Channel URL: .../archives/<CID>
     m = re.match(
-        r"https?://([^/]+?)\.slack\.com/archives/([A-Z0-9]+)",
+        r"https?://([^/]+?)\.slack\.com/archives/([A-Z0-9a-z]+)",
         target,
     )
     if m:

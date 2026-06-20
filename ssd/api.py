@@ -13,7 +13,7 @@ def _url_encode_cookie(cookie: str) -> str:
     """URL-encode the xoxd- cookie value for use in a Cookie header.
     Slack stores the cookie URL-encoded (/ -> %2F, + -> %2B).
     """
-    return quote(cookie, safe="-")
+    return quote(cookie, safe="")
 
 
 class SlackAPI:
@@ -33,6 +33,11 @@ class SlackAPI:
             # https://acme.enterprise.slack.com/ -> acme.enterprise
             host = urlparse(url).hostname or ""
             domain = host.replace(".slack.com", "") if host.endswith(".slack.com") else host
+        if not domain:
+            raise RuntimeError(
+                "Could not determine workspace domain from auth.test response. "
+                "Check that the token is valid."
+            )
         return domain
 
     def resolve_channel(self, name_or_id: str) -> tuple[str, str]:

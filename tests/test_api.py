@@ -145,3 +145,22 @@ def test_enrich_no_replies(mock_client):
     assert enriched[0]["thread"] == []
     assert enriched[0]["user_name"] == "bob"
     mock_client.conversations_replies.assert_not_called()
+
+
+def test_enrich_bot_message_no_user(mock_client):
+    """Bot/app messages with no user field should produce user_name='unknown' and be included."""
+    api = SlackAPI("xoxd-fake", delay=0)
+    messages = [{"ts": "1.0", "text": "bot msg", "reactions": [], "files": []}]  # no 'user' key
+    result = api.enrich("C123", messages)
+    assert len(result) == 1
+    assert result[0]["user_name"] == "unknown"
+    assert result[0]["text"] == "bot msg"
+    mock_client.users_info.assert_not_called()
+
+
+def test_get_workspace_raises_on_empty_domain(mock_client):
+    """get_workspace should raise RuntimeError when no domain can be derived."""
+    mock_client.auth_test.return_value = {"ok": True, "url": ""}
+    api = SlackAPI("xoxd-fake")
+    with pytest.raises(RuntimeError, match="Could not determine workspace domain"):
+        api.get_workspace()

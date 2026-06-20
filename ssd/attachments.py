@@ -6,10 +6,9 @@ import requests
 
 
 def _safe_name(name: str) -> str:
-    """Strip path separators and leading dots from Slack filenames."""
-    # Replace any path separator or null byte with underscore
+    """Strip path separators, null bytes, and relative-path escape sequences."""
     safe = _re.sub(r"[/\\:\x00]", "_", name)
-    # Prevent hidden files and relative path escape
+    safe = safe.replace("..", "__")
     return safe.lstrip(".") or "file"
 
 

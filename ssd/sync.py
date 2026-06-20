@@ -21,13 +21,13 @@ def _refresh_old_threads(
     api: SlackAPI,
     channel_id: str,
     out_dir: Path,
-    cursor_ts: str,
+    sync_floor: str,
     token: str | None = None,
     attachments_enabled: bool = False,
 ) -> None:
-    """Fetch new replies for threads on messages older than cursor_ts.
+    """Fetch new replies for threads on messages older than sync_floor.
 
-    conversations_history with oldest= misses replies added to pre-cursor messages.
+    conversations_history with oldest= misses replies added to pre-sync_floor messages.
     This closes that gap by polling each known thread for replies newer than the
     last reply we already have.
     """
@@ -37,8 +37,8 @@ def _refresh_old_threads(
     stored: list[dict] = json.loads(messages_path.read_text())
     refreshed = 0
     for msg in stored:
-        # Skip messages at or after the cursor — already enriched in this run
-        if float(msg["ts"]) >= float(cursor_ts):
+        # Skip messages at or after the sync floor — already enriched in this run
+        if float(msg["ts"]) >= float(sync_floor):
             continue
         thread = msg.get("thread")
         if not thread:
@@ -83,11 +83,17 @@ def _refresh_old_threads(
 def _since_to_ts(since: str) -> str:
     """Convert YYYY-MM-DD or Unix timestamp string to Unix timestamp string."""
     try:
-        float(since)  # test if it's already a number
+        float(since)
         return since
     except ValueError:
+        pass
+    try:
         dt = datetime.strptime(since, "%Y-%m-%d").replace(tzinfo=UTC)
         return str(dt.timestamp())
+    except ValueError:
+        raise ValueError(
+            f"Invalid --since value: {since!r}. Use YYYY-MM-DD or a Unix timestamp."
+        ) from None
 
 
 def run_sync(
