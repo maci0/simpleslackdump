@@ -189,3 +189,38 @@ def extract_cookie() -> str | None:
         if result:
             return result
     return None
+
+
+def validate_auth(token: str, cookie: str | None) -> bool:
+    """Return True if the token (and optional cookie) authenticate successfully."""
+    try:
+        import json as _json
+        import urllib.request
+        from urllib.parse import quote as _quote
+
+        headers: dict[str, str] = {"Authorization": f"Bearer {token}"}
+        if cookie:
+            headers["Cookie"] = f"d={_quote(cookie, safe='')}"
+        req = urllib.request.Request("https://slack.com/api/auth.test", headers=headers)
+        resp = _json.loads(urllib.request.urlopen(req, timeout=10).read())
+        return bool(resp.get("ok"))
+    except Exception:
+        return False
+
+
+def extract_cookie_with_validation(token: str, retries: int = 3, delay: float = 2.0) -> str | None:
+    """Extract the xoxd- cookie and verify it authenticates against the Slack API.
+
+    Chrome writes cookies to disk with a lag behind the in-memory session.
+    This retries extraction up to `retries` times so stale on-disk values are
+    not returned as valid.
+    """
+    import time
+
+    for attempt in range(retries):
+        cookie = extract_cookie()
+        if cookie and validate_auth(token, cookie):
+            return cookie
+        if attempt < retries - 1:
+            time.sleep(delay)
+    return None

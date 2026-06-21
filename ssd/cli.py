@@ -38,7 +38,7 @@ def main(
 @click.pass_context
 def token(ctx: click.Context) -> None:
     """Extract Slack token from macOS desktop app."""
-    from ssd.token import extract_cookie, extract_token
+    from ssd.token import extract_cookie_with_validation, extract_token
 
     tok = extract_token()
     click.echo(tok, err=True)
@@ -49,7 +49,8 @@ def token(ctx: click.Context) -> None:
     token_path.chmod(0o600)
     click.echo(f"Token saved to {token_path}", err=True)
 
-    cookie = extract_cookie()
+    click.echo("Validating cookie (Chrome may lag disk; retrying up to 3x)...", err=True)
+    cookie = extract_cookie_with_validation(tok)
     if cookie:
         cookie_path = out / ".cookie"
         cookie_path.write_text(cookie)
@@ -57,9 +58,8 @@ def token(ctx: click.Context) -> None:
         click.echo(f"Cookie saved to {cookie_path}", err=True)
     else:
         click.echo(
-            "Warning: could not extract d cookie from any source "
-            "(Slack Cookies file, Firefox, Chrome). "
-            "Make sure at least one browser is open and signed into Slack, "
+            "Warning: could not extract a valid d cookie from any source. "
+            "Make sure Chrome or Firefox is open and signed into Slack, "
             "then re-run ssd token.",
             err=True,
         )
@@ -89,7 +89,13 @@ def _make_api(
     delay: float,
     cfg: Any = None,
 ) -> tuple[SlackAPI, str, str, bool]:
-    """Return (api, workspace, token, attach). Shared setup for dump/sync/update."""
+    """Return (api, workspace, token, attach). Shared setup for dump/sync/update.
+
+    If auth fails with a saved cookie (Slack may have rotated the session),
+    re-extracts and validates the cookie automatically before raising.
+    """
+    from slack_sdk.errors import SlackApiError
+
     from ssd.config import load_config
 
     if cfg is None:
@@ -97,7 +103,30 @@ def _make_api(
     token = _get_token(ctx_obj)
     cookie = _get_cookie(ctx_obj)
     api = SlackAPI(token, delay=delay, cookie=cookie)
-    workspace = api.get_workspace()
+    try:
+        workspace = api.get_workspace()
+    except SlackApiError as exc:
+        if exc.response.get("error") != "invalid_auth":
+            raise
+        # Cookie likely rotated since last ssd token run. Re-extract and retry once.
+        click.echo("Auth failed with saved cookie; re-extracting from browser...", err=True)
+        from ssd.token import extract_cookie_with_validation
+
+        fresh_cookie = extract_cookie_with_validation(token)
+        if not fresh_cookie:
+            raise RuntimeError(
+                "invalid_auth: could not obtain a valid cookie. "
+                "Run 'ssd token' with Chrome or Firefox open and signed into Slack."
+            ) from exc
+        # Persist so the next call is warm
+        out = Path(ctx_obj["output"])
+        out.mkdir(parents=True, exist_ok=True)
+        cookie_path = out / ".cookie"
+        cookie_path.write_text(fresh_cookie)
+        cookie_path.chmod(0o600)
+        api = SlackAPI(token, delay=delay, cookie=fresh_cookie)
+        workspace = api.get_workspace()
+        cookie = fresh_cookie
     attach = ctx_obj["attachments"]
     if attach is None:
         attach = cfg.settings.attachments
