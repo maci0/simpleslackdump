@@ -93,3 +93,14 @@ def read_cursor(dir: Path) -> str | None:
 def write_cursor(dir: Path, ts: str) -> None:
     dir.mkdir(parents=True, exist_ok=True)
     _atomic_write(dir / ".cursor", ts)
+
+
+def write_users(dir: Path, profiles: dict[str, Any]) -> None:
+    """Write user profiles to users.json — keyed by user ID, sorted by display name."""
+    if not profiles:
+        return
+    sorted_profiles = dict(
+        sorted(profiles.items(), key=lambda kv: kv[1].get("display_name") or kv[0])
+    )
+    dir.mkdir(parents=True, exist_ok=True)
+    _atomic_write(dir / "users.json", json.dumps(sorted_profiles, indent=2, ensure_ascii=False))

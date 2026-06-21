@@ -23,6 +23,7 @@ class SlackAPI:
         self.client = WebClient(token=token, headers=headers)
         self.delay = delay
         self._user_cache: dict[str, str] = {}
+        self._profile_cache: dict[str, dict[str, Any]] = {}
 
     def get_workspace(self) -> str:
         resp = self.client.auth_test()
@@ -107,12 +108,32 @@ class SlackAPI:
         if user_id in self._user_cache:
             return self._user_cache[user_id]
         try:
-            profile = self.client.users_info(user=user_id)["user"]["profile"]
-            name = profile.get("display_name_normalized") or profile.get("real_name", user_id)
+            user_obj = self.client.users_info(user=user_id)["user"]
+            p = user_obj.get("profile", {})
+            name = p.get("display_name_normalized") or p.get("real_name") or user_id
+            self._profile_cache[user_id] = {
+                "id": user_id,
+                "handle": user_obj.get("name", ""),
+                "real_name": p.get("real_name_normalized") or p.get("real_name", ""),
+                "display_name": p.get("display_name_normalized") or p.get("display_name", ""),
+                "title": p.get("title", ""),
+                "email": p.get("email", ""),
+                "phone": p.get("phone", ""),
+                "status_text": p.get("status_text", ""),
+                "status_emoji": p.get("status_emoji", ""),
+                "timezone": user_obj.get("tz", ""),
+                "timezone_label": user_obj.get("tz_label", ""),
+                "is_bot": user_obj.get("is_bot", False),
+                "image": p.get("image_192") or p.get("image_72", ""),
+            }
         except Exception:
             name = user_id
         self._user_cache[user_id] = name
         return name
+
+    def get_user_profiles(self) -> dict[str, dict[str, Any]]:
+        """Return all user profiles fetched so far, keyed by user ID."""
+        return dict(self._profile_cache)
 
     def enrich_reply(self, r: dict[str, Any]) -> dict[str, Any]:
         """Enrich a single reply dict — name resolution and mention substitution only,

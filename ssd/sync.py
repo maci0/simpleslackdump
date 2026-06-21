@@ -13,6 +13,7 @@ from ssd.output import (
     read_cursor,
     write_cursor,
     write_messages,
+    write_users,
 )
 from ssd.parser import parse_target
 
@@ -140,6 +141,7 @@ def run_sync(
         )
         _atomic_write(thread_dir / "thread.md", format_markdown(sorted_msgs))
         write_cursor(thread_dir, max(m["ts"] for m in enriched))
+        write_users(thread_dir, api.get_user_profiles())
         click.echo(f"  thread {parsed.thread_ts}: {len(enriched)} new replies")
         return
 
@@ -184,3 +186,5 @@ def run_sync(
         _refresh_old_threads(
             api, channel_id, out_dir, oldest, token=token, attachments_enabled=attachments_enabled
         )
+
+    write_users(out_dir, api.get_user_profiles())

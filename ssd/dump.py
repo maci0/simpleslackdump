@@ -5,7 +5,14 @@ from typing import Any
 import click
 
 from ssd.api import SlackAPI
-from ssd.output import _atomic_write, channel_dir, format_markdown, write_cursor, write_messages
+from ssd.output import (
+    _atomic_write,
+    channel_dir,
+    format_markdown,
+    write_cursor,
+    write_messages,
+    write_users,
+)
 from ssd.parser import parse_target
 
 
@@ -47,6 +54,7 @@ def run_dump(
         _atomic_write(thread_dir / "thread.md", format_markdown(sorted_msgs))
         if enriched:
             write_cursor(thread_dir, max(m["ts"] for m in enriched))
+        write_users(thread_dir, api.get_user_profiles())
         elapsed = time.monotonic() - t0
         click.echo(
             f"  thread {parsed.thread_ts}: {len(enriched)} replies"
@@ -84,6 +92,7 @@ def run_dump(
     write_messages(out_dir, enriched)
     if enriched:
         write_cursor(out_dir, max(m["ts"] for m in enriched))
+    write_users(out_dir, api.get_user_profiles())
 
     total_elapsed = time.monotonic() - t0
     click.echo(
