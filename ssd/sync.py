@@ -32,6 +32,8 @@ def _refresh_old_threads(
     This closes that gap by polling each known thread for replies newer than the
     last reply we already have.
     """
+    import time
+
     messages_path = out_dir / "messages.json"
     if not messages_path.exists():
         return
@@ -45,6 +47,7 @@ def _refresh_old_threads(
         if not thread:
             continue
         latest_reply_ts = max(r["ts"] for r in thread)
+        time.sleep(api.delay)  # respect rate limit between per-thread API calls
         new_raw = api.get_replies(channel_id, msg["ts"], oldest=latest_reply_ts)
         # oldest= is inclusive; skip the reply we already have
         new_raw = [r for r in new_raw if float(r["ts"]) > float(latest_reply_ts)]
