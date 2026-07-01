@@ -3,6 +3,7 @@ import time
 from typing import Any
 from urllib.parse import quote, urlparse
 
+import click
 from slack_sdk import WebClient
 
 _ID_RE = re.compile(r"^[CDG][A-Z0-9a-z]+$")
@@ -60,7 +61,11 @@ class SlackAPI:
         raise ValueError(f"Channel not found: {name_or_id}")
 
     def _paginate(
-        self, sdk_method: Any, base_kwargs: dict[str, Any], oldest: str | None = None
+        self,
+        sdk_method: Any,
+        base_kwargs: dict[str, Any],
+        oldest: str | None = None,
+        max_retries: int = 3,
     ) -> list[dict[str, Any]]:
         items = []
         cursor = None
@@ -70,7 +75,28 @@ class SlackAPI:
                 kwargs["oldest"] = oldest
             if cursor:
                 kwargs["cursor"] = cursor
-            resp = sdk_method(**kwargs)
+            # Retry loop for transient network/rate-limit errors
+            resp = None
+            for attempt in range(max_retries):
+                try:
+                    resp = sdk_method(**kwargs)
+                    break
+                except Exception as exc:
+                    err = getattr(getattr(exc, "response", None), "get", lambda k, d=None: d)(
+                        "error"
+                    )
+                    if err == "ratelimited" or isinstance(exc, (TimeoutError, OSError)):
+                        wait = self.delay * (2**attempt)
+                        click.echo(
+                            f"  [retry {attempt + 1}/{max_retries}] {exc.__class__.__name__}"
+                            f" — waiting {wait:.1f}s",
+                            err=True,
+                        )
+                        time.sleep(wait)
+                    else:
+                        raise
+            if resp is None:
+                raise RuntimeError("Slack API request failed after retries")
             page = resp.get("messages")
             if page is None:
                 break  # unexpected response shape — stop paginating rather than silently dropping
