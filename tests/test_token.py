@@ -80,6 +80,7 @@ def test_extract_raises_when_nothing_found(tmp_path, monkeypatch):
     (ldb_dir / "000001.log").write_bytes(b"no token here")
     monkeypatch.setattr(token_mod, "COOKIES_PATH", db)
     monkeypatch.setattr(token_mod, "LEVELDB_PATH", ldb_dir)
+    monkeypatch.setattr(token_mod, "_from_chrome_storage", lambda: None)
 
     with pytest.raises(RuntimeError, match="Could not extract"):
         extract_token()

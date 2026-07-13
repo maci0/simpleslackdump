@@ -56,12 +56,10 @@ def _from_leveldb() -> str | None:
     return None
 
 
-def _from_raw_scan() -> str | None:
-    """Scan LevelDB .ldb/.log files for xoxc token (longest match wins)."""
-    if not LEVELDB_PATH.exists():
-        return None
+def _scan_ldb_dir(ldb_dir: Path) -> str | None:
+    """Longest xox[bcps]- token found across all .ldb/.log files in a LevelDB dir."""
     best: str | None = None
-    for path in sorted(LEVELDB_PATH.iterdir()):
+    for path in sorted(ldb_dir.iterdir()):
         if path.suffix not in (".ldb", ".log"):
             continue
         try:
@@ -73,6 +71,23 @@ def _from_raw_scan() -> str | None:
         except Exception:
             continue
     return best
+
+
+def _from_raw_scan() -> str | None:
+    """Scan Slack desktop app LevelDB for xoxc token."""
+    return _scan_ldb_dir(LEVELDB_PATH) if LEVELDB_PATH.exists() else None
+
+
+def _from_chrome_storage() -> str | None:
+    """Scan Chrome's Slack localStorage LevelDB for xoxc token.
+
+    Useful when the Slack desktop app isn't installed but Slack is open in Chrome.
+    """
+    chrome_ldb = (
+        Path.home()
+        / "Library/Application Support/Google/Chrome/Default/Local Storage/leveldb"
+    )
+    return _scan_ldb_dir(chrome_ldb) if chrome_ldb.exists() else None
 
 
 def _chrome_d_cookie() -> str | None:
@@ -138,11 +153,14 @@ def extract_token() -> str:
     _from_slack_cookies is NOT included here: it returns xoxd- (a session cookie),
     not the xoxc- bearer token. xoxd- is handled by extract_cookie().
     """
-    for method in (_from_leveldb, _from_raw_scan):
+    for method in (_from_leveldb, _from_raw_scan, _from_chrome_storage):
         result = method()
         if result:
             return result
-    raise RuntimeError("Could not extract Slack token. Is Slack installed and have you logged in?")
+    raise RuntimeError(
+        "Could not extract Slack token. "
+        "Open Slack (desktop app or Chrome) and try again."
+    )
 
 
 def _from_firefox_cookies() -> str | None:
