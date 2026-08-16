@@ -21,6 +21,56 @@ def test_dump_help_has_all(invoke):
 def test_help_lists_query(invoke):
     result = invoke("--help")
     assert "query" in result.output
+    assert "Dump Slack channels" in result.output
+
+
+def test_query_help(invoke):
+    result = invoke("query", "--help")
+    assert result.exit_code == 0
+    assert "Read local dump data" in result.output
+    assert "search" in result.output
+    assert "from:/in:/has:/is:" in result.output
+    assert "conversations.history" in result.output
+
+
+def test_query_missing_dump_is_usage_error(invoke, tmp_path):
+    missing = tmp_path / "nope"
+    result = invoke("--output", str(missing), "query", "stats")
+    assert result.exit_code != 0
+    assert "No dump at" in result.output
+    assert str(missing) in result.output
+
+
+def test_query_empty_dump_hints_stderr(invoke, tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    result = invoke("--output", str(tmp_path), "query", "stats")
+    assert result.exit_code == 0
+    combined = f"{result.stderr}\n{result.output}"
+    assert "No channels under" in combined
+    assert str(tmp_path) in combined
+    json_line = next(ln for ln in reversed(result.output.splitlines()) if ln.startswith("{"))
+    data = json.loads(json_line)
+    assert data["ok"] is True
+    assert data["channels"] == 0
+
+
+def test_query_ok_false_exits_one(invoke, tmp_path):
+    _query_dump(tmp_path)
+    result = invoke("--output", str(tmp_path), "query", "message", "C123", "9.9")
+    assert result.exit_code == 1
+    data = json.loads(result.output)
+    assert data["ok"] is False
+    assert data["error"] == "message_not_found"
+
+
+def test_query_pretty_json_when_tty(invoke, tmp_path, monkeypatch):
+    _query_dump(tmp_path)
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "stats")
+    assert result.exit_code == 0
+    assert "\n" in result.output
+    data = json.loads(result.output)
+    assert data["ok"] is True
 
 
 def test_query_stats(invoke, tmp_path):

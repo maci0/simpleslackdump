@@ -2098,7 +2098,7 @@ def _discover(root: Path) -> dict[str, _Channel]:
 
 
 class DumpClient:
-    """Read-only Slack Web API over a local ssd dump. No tokens, no network."""
+    """Read-only Slack Web API over a local ssd dump or Slack export. No tokens, no network."""
 
     def __init__(self, path: str | Path):
         self.root = Path(path)

@@ -1,4 +1,5 @@
 import glob as _glob
+import sys
 import webbrowser
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ def main(
     attachments: bool | None,
     delay: float,
 ) -> None:
+    """Dump Slack channels to JSON/Markdown. Query dumps locally with no Slack network."""
     ctx.ensure_object(dict)
     ctx.obj["token"] = token
     ctx.obj["output"] = output
@@ -340,15 +342,45 @@ def graph(ctx: click.Context, channel_dirs: tuple[str, ...], output: str) -> Non
     webbrowser.open(f"file://{str(Path(output).resolve())}")
 
 
+def _json_pretty() -> bool:
+    return sys.stdout.isatty()
+
+
 def _print_json(data: Any) -> None:
+    pretty = _json_pretty()
     try:
         import orjson
 
-        click.echo(orjson.dumps(data).decode())
+        opts = orjson.OPT_INDENT_2 if pretty else 0
+        click.echo(orjson.dumps(data, option=opts).decode())
     except ImportError:
         import json
 
-        click.echo(json.dumps(data, ensure_ascii=False))
+        click.echo(json.dumps(data, ensure_ascii=False, indent=2 if pretty else None))
+    if isinstance(data, dict) and data.get("ok") is False:
+        ctx = click.get_current_context(silent=True)
+        if ctx is not None:
+            ctx.exit(1)
+        raise SystemExit(1)
+
+
+def _client(ctx: click.Context) -> Any:
+    from ssd.dumpapi import DumpClient
+
+    path = Path(ctx.obj["output"])
+    try:
+        client = DumpClient(path)
+    except FileNotFoundError as exc:
+        raise click.UsageError(
+            f"No dump at {path}. Run ssd dump, or pass --output."
+        ) from exc
+    if not client._channels:
+        click.echo(
+            f"No channels under {path}. Dump first, or point --output at a "
+            "workspace or export.",
+            err=True,
+        )
+    return client
 
 
 @main.group("query")
@@ -356,15 +388,13 @@ def query_cmd() -> None:
     """Read local dump data. No Slack network."""
 
 
-@query_cmd.command("stats")
+@query_cmd.command("stats", help="Channel and message counts")
 @click.pass_context
 def query_stats(ctx: click.Context) -> None:
-    from ssd.dumpapi import DumpClient
-
-    _print_json(DumpClient(ctx.obj["output"]).stats())
+    _print_json(_client(ctx).stats())
 
 
-@query_cmd.command("search")
+@query_cmd.command("search", help="Search messages and files (from:/in:/has:/is:)")
 @click.argument("q")
 @click.option("--count", default=20, type=int)
 @click.option("--page", default=None, type=int)
@@ -373,16 +403,14 @@ def query_stats(ctx: click.Context) -> None:
 def query_search(
     ctx: click.Context, q: str, count: int, page: int | None, sort_dir: str
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
     _print_json(
-        DumpClient(ctx.obj["output"]).search_all(
+        _client(ctx).search_all(
             query=q, count=count, page=page, sort_dir=sort_dir
         )
     )
 
 
-@query_cmd.command("history")
+@query_cmd.command("history", help="conversations.history; --search filters that channel")
 @click.argument("channel")
 @click.option("--search", default=None)
 @click.option("--limit", default=100, type=int)
@@ -401,9 +429,7 @@ def query_history(
     inclusive: bool,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     kwargs: dict[str, Any] = {
         "channel": channel,
         "limit": limit,
@@ -418,7 +444,7 @@ def query_history(
     _print_json(client.conversations_history(**kwargs))
 
 
-@query_cmd.command("cursor")
+@query_cmd.command("cursor", help="Sync cursor ts; omit channel to list all")
 @click.argument("channel", required=False)
 @click.option("--search", default=None)
 @click.option("--count", default=None, type=int)
@@ -433,9 +459,7 @@ def query_cursor(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if channel:
         _print_json(client.get_cursor(channel=channel))
         return
@@ -452,7 +476,7 @@ def query_cursor(
     _print_json(client.cursors_list(count=count, page=page, cursor=cursor))
 
 
-@query_cmd.command("channels")
+@query_cmd.command("channels", help="conversations.list / info; --search filters")
 @click.argument("channel", required=False)
 @click.option("--search", default=None)
 @click.option("--exclude-archived", is_flag=True)
@@ -469,9 +493,7 @@ def query_channels(
     limit: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if channel:
         _print_json(client.conversations_info(channel=channel))
         return
@@ -495,7 +517,7 @@ def query_channels(
     _print_json(client.conversations_list(**kwargs))
 
 
-@query_cmd.command("users")
+@query_cmd.command("users", help="users.list / info; --search filters")
 @click.argument("user", required=False)
 @click.option("--search", default=None)
 @click.option("--message-users/--no-message-users", default=True)
@@ -514,9 +536,7 @@ def query_users(
     limit: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if user:
         _print_json(client.users_info(user=user))
         return
@@ -540,7 +560,7 @@ def query_users(
     _print_json(client.users_list(**kwargs))
 
 
-@query_cmd.command("files")
+@query_cmd.command("files", help="files.list / info; --search filters")
 @click.argument("file", required=False)
 @click.option("--search", default=None)
 @click.option("--channel", default=None)
@@ -565,9 +585,7 @@ def query_files(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if file:
         _print_json(client.files_info(file=file))
         return
@@ -590,7 +608,7 @@ def query_files(
     _print_json(client.files_list(**kwargs))
 
 
-@query_cmd.command("remote-files")
+@query_cmd.command("remote-files", help="files.remote.list / info; --search filters")
 @click.argument("file_id", required=False)
 @click.option("--search", default=None)
 @click.option("--count", default=None, type=int)
@@ -605,9 +623,7 @@ def query_remote_files(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if search:
         kwargs: dict[str, Any] = {"query": search}
         if count is not None:
@@ -624,35 +640,29 @@ def query_remote_files(
     _print_json(client.files_remote_list(count=count, page=page, cursor=cursor))
 
 
-@query_cmd.command("message")
+@query_cmd.command("message", help="One message by channel and ts")
 @click.argument("channel")
 @click.argument("ts")
 @click.pass_context
 def query_message(ctx: click.Context, channel: str, ts: str) -> None:
-    from ssd.dumpapi import DumpClient
-
-    _print_json(DumpClient(ctx.obj["output"]).get_message(channel=channel, ts=ts))
+    _print_json(_client(ctx).get_message(channel=channel, ts=ts))
 
 
-@query_cmd.command("export")
+@query_cmd.command("export", help="Write messages as JSONL")
 @click.argument("dest", type=click.Path())
 @click.option("--channel", default=None)
 @click.pass_context
 def query_export(ctx: click.Context, dest: str, channel: str | None) -> None:
-    from ssd.dumpapi import DumpClient
-
-    n = DumpClient(ctx.obj["output"]).export_jsonl(dest, channel=channel)
+    n = _client(ctx).export_jsonl(dest, channel=channel)
     click.echo(str(n))
 
 
-@query_cmd.command("emoji")
+@query_cmd.command("emoji", help="emoji.list / get; --search filters")
 @click.argument("name", required=False)
 @click.option("--search", default=None)
 @click.pass_context
 def query_emoji(ctx: click.Context, name: str | None, search: str | None) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if search:
         _print_json(client.emoji_search(query=search))
         return
@@ -662,23 +672,19 @@ def query_emoji(ctx: click.Context, name: str | None, search: str | None) -> Non
     _print_json(client.emoji_list())
 
 
-@query_cmd.command("identity")
+@query_cmd.command("identity", help="users.identity from auth.json")
 @click.pass_context
 def query_identity(ctx: click.Context) -> None:
-    from ssd.dumpapi import DumpClient
-
-    _print_json(DumpClient(ctx.obj["output"]).users_identity())
+    _print_json(_client(ctx).users_identity())
 
 
-@query_cmd.command("auth")
+@query_cmd.command("auth", help="auth.test from auth.json")
 @click.pass_context
 def query_auth(ctx: click.Context) -> None:
-    from ssd.dumpapi import DumpClient
-
-    _print_json(DumpClient(ctx.obj["output"]).auth_test())
+    _print_json(_client(ctx).auth_test())
 
 
-@query_cmd.command("teams")
+@query_cmd.command("teams", help="auth.teams.list; --search filters")
 @click.option("--search", default=None)
 @click.option("--count", default=None, type=int)
 @click.option("--page", default=None, type=int)
@@ -691,9 +697,7 @@ def query_teams(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if search:
         kwargs: dict[str, Any] = {"query": search}
         if count is not None:
@@ -707,46 +711,40 @@ def query_teams(
     _print_json(client.auth_teams_list(count=count, page=page, cursor=cursor))
 
 
-@query_cmd.command("rtm")
+@query_cmd.command("rtm", help="rtm.connect snapshot; --start for rtm.start")
 @click.option("--start", is_flag=True)
 @click.pass_context
 def query_rtm(ctx: click.Context, start: bool) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if start:
         _print_json(client.rtm_start())
         return
     _print_json(client.rtm_connect())
 
 
-@query_cmd.command("team-profile")
+@query_cmd.command("team-profile", help="team.profile.get; --search filters")
 @click.option("--search", default=None)
 @click.pass_context
 def query_team_profile(ctx: click.Context, search: str | None) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if search:
         _print_json(client.team_profile_search(query=search))
         return
     _print_json(client.team_profile_get())
 
 
-@query_cmd.command("prefs")
+@query_cmd.command("prefs", help="team.preferences; --search filters")
 @click.option("--search", default=None)
 @click.pass_context
 def query_prefs(ctx: click.Context, search: str | None) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if search:
         _print_json(client.team_preferences_search(query=search))
         return
     _print_json(client.team_preferences_list())
 
 
-@query_cmd.command("external-teams")
+@query_cmd.command("external-teams", help="team.externalTeams; --search filters")
 @click.option("--search", default=None)
 @click.option("--count", default=None, type=int)
 @click.option("--page", default=None, type=int)
@@ -759,9 +757,7 @@ def query_external_teams(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if search:
         kwargs: dict[str, Any] = {"query": search}
         if count is not None:
@@ -777,16 +773,14 @@ def query_external_teams(
     )
 
 
-@query_cmd.command("profile")
+@query_cmd.command("profile", help="users.profile.get")
 @click.argument("user")
 @click.pass_context
 def query_profile(ctx: click.Context, user: str) -> None:
-    from ssd.dumpapi import DumpClient
-
-    _print_json(DumpClient(ctx.obj["output"]).users_profile_get(user=user))
+    _print_json(_client(ctx).users_profile_get(user=user))
 
 
-@query_cmd.command("pins")
+@query_cmd.command("pins", help="pins.list / info; --search filters")
 @click.argument("channel", required=False)
 @click.argument("ts", required=False)
 @click.option("--search", default=None)
@@ -803,9 +797,7 @@ def query_pins(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if channel and ts:
         _print_json(client.pins_info(channel=channel, ts=ts))
         return
@@ -824,7 +816,7 @@ def query_pins(
     )
 
 
-@query_cmd.command("scheduled")
+@query_cmd.command("scheduled", help="chat.scheduledMessages; --search filters")
 @click.argument("scheduled_id", required=False)
 @click.option("--search", default=None)
 @click.option("--channel", default=None)
@@ -845,9 +837,7 @@ def query_scheduled(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if scheduled_id:
         _print_json(client.chat_scheduledMessages_info(id=scheduled_id))
         return
@@ -868,7 +858,7 @@ def query_scheduled(
     )
 
 
-@query_cmd.command("threads")
+@query_cmd.command("threads", help="Thread index; --search filters")
 @click.argument("channel", required=False)
 @click.argument("ts", required=False)
 @click.option("--search", default=None)
@@ -885,9 +875,7 @@ def query_threads(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if channel and ts:
         _print_json(client.threads_info(channel=channel, ts=ts))
         return
@@ -906,7 +894,7 @@ def query_threads(
     )
 
 
-@query_cmd.command("replies")
+@query_cmd.command("replies", help="conversations.replies; --search filters")
 @click.argument("channel")
 @click.argument("ts")
 @click.option("--search", default=None)
@@ -927,9 +915,7 @@ def query_replies(
     limit: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     kwargs: dict[str, Any] = {
         "channel": channel,
         "ts": ts,
@@ -947,7 +933,7 @@ def query_replies(
     _print_json(client.conversations_replies(**kwargs))
 
 
-@query_cmd.command("stars")
+@query_cmd.command("stars", help="stars.list / info; --search filters")
 @click.argument("channel", required=False)
 @click.argument("ts", required=False)
 @click.option("--channel", "channel_opt", default=None)
@@ -966,9 +952,7 @@ def query_stars(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if channel and ts:
         _print_json(client.stars_info(channel=channel, ts=ts))
         return
@@ -989,7 +973,7 @@ def query_stars(
     )
 
 
-@query_cmd.command("reminders")
+@query_cmd.command("reminders", help="reminders.list / info; --search filters")
 @click.argument("reminder", required=False)
 @click.option("--search", default=None)
 @click.option("--complete/--no-complete", default=True)
@@ -1008,9 +992,7 @@ def query_reminders(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if reminder:
         _print_json(client.reminders_info(reminder=reminder))
         return
@@ -1035,7 +1017,7 @@ def query_reminders(
     )
 
 
-@query_cmd.command("usergroups")
+@query_cmd.command("usergroups", help="usergroups.list / info; --search filters")
 @click.argument("usergroup", required=False)
 @click.option("--search", default=None)
 @click.option("--include-disabled", is_flag=True)
@@ -1056,9 +1038,7 @@ def query_usergroups(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if usergroup:
         _print_json(client.usergroups_info(usergroup=usergroup))
         return
@@ -1084,7 +1064,7 @@ def query_usergroups(
     )
 
 
-@query_cmd.command("presence")
+@query_cmd.command("presence", help="users.getPresence; --search or --all")
 @click.argument("user", required=False, default=None)
 @click.option("--search", default=None)
 @click.option("--all", "all_users", is_flag=True)
@@ -1092,9 +1072,7 @@ def query_usergroups(
 def query_presence(
     ctx: click.Context, user: str | None, search: str | None, all_users: bool
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if search:
         _print_json(client.presence_search(query=search))
         return
@@ -1104,7 +1082,7 @@ def query_presence(
     _print_json(client.users_getPresence(user=user))
 
 
-@query_cmd.command("access-logs")
+@query_cmd.command("access-logs", help="team.accessLogs; --search filters")
 @click.option("--search", default=None)
 @click.option("--user", default=None)
 @click.option("--after", default=None)
@@ -1123,9 +1101,7 @@ def query_access_logs(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if search:
         kwargs: dict[str, Any] = {
             "query": search,
@@ -1148,15 +1124,13 @@ def query_access_logs(
     )
 
 
-@query_cmd.command("team")
+@query_cmd.command("team", help="team.info")
 @click.pass_context
 def query_team(ctx: click.Context) -> None:
-    from ssd.dumpapi import DumpClient
-
-    _print_json(DumpClient(ctx.obj["output"]).team_info())
+    _print_json(_client(ctx).team_info())
 
 
-@query_cmd.command("bots")
+@query_cmd.command("bots", help="bots.list / info; --search filters")
 @click.argument("bot", required=False)
 @click.option("--search", default=None)
 @click.option("--count", default=None, type=int)
@@ -1171,9 +1145,7 @@ def query_bots(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if search:
         kwargs: dict[str, Any] = {"query": search}
         if count is not None:
@@ -1190,7 +1162,7 @@ def query_bots(
     _print_json(client.bots_list(count=count, page=page, cursor=cursor))
 
 
-@query_cmd.command("members")
+@query_cmd.command("members", help="conversations.members; --search filters")
 @click.argument("channel")
 @click.option("--search", default=None)
 @click.option("--limit", default=None, type=int)
@@ -1203,9 +1175,7 @@ def query_members(
     limit: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     kwargs: dict[str, Any] = {"channel": channel}
     if limit is not None:
         kwargs["limit"] = limit
@@ -1217,7 +1187,7 @@ def query_members(
     _print_json(client.conversations_members(**kwargs))
 
 
-@query_cmd.command("convos")
+@query_cmd.command("convos", help="users.conversations; --search filters")
 @click.argument("user")
 @click.option("--search", default=None)
 @click.option("--types", default=None)
@@ -1234,9 +1204,7 @@ def query_convos(
     limit: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     kwargs: dict[str, Any] = {
         "user": user,
         "types": types,
@@ -1252,7 +1220,7 @@ def query_convos(
     _print_json(client.users_conversations(**kwargs))
 
 
-@query_cmd.command("reactions")
+@query_cmd.command("reactions", help="reactions.get / list; --search filters")
 @click.argument("channel", required=False)
 @click.argument("ts", required=False)
 @click.option("--search", default=None)
@@ -1271,9 +1239,7 @@ def query_reactions(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if channel and ts:
         _print_json(client.reactions_get(channel=channel, timestamp=ts))
         return
@@ -1292,7 +1258,7 @@ def query_reactions(
     )
 
 
-@query_cmd.command("dnd")
+@query_cmd.command("dnd", help="dnd.info / teamInfo; --search filters")
 @click.argument("user", required=False, default=None)
 @click.option("--search", default=None)
 @click.option("--users", default=None, help="Comma-separated user ids for dnd.teamInfo")
@@ -1300,9 +1266,7 @@ def query_reactions(
 def query_dnd(
     ctx: click.Context, user: str | None, search: str | None, users: str | None
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if search:
         _print_json(client.dnd_search(query=search, users=users or user))
         return
@@ -1312,7 +1276,7 @@ def query_dnd(
     _print_json(client.dnd_info(user=user))
 
 
-@query_cmd.command("comments")
+@query_cmd.command("comments", help="files.comments; --search filters")
 @click.argument("file_id")
 @click.option("--search", default=None)
 @click.option("--count", default=None, type=int)
@@ -1327,9 +1291,7 @@ def query_comments(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if search:
         kwargs: dict[str, Any] = {"file": file_id, "query": search}
         if count is not None:
@@ -1345,25 +1307,21 @@ def query_comments(
     )
 
 
-@query_cmd.command("email")
+@query_cmd.command("email", help="users.lookupByEmail")
 @click.argument("addr")
 @click.pass_context
 def query_email(ctx: click.Context, addr: str) -> None:
-    from ssd.dumpapi import DumpClient
-
-    _print_json(DumpClient(ctx.obj["output"]).users_lookupByEmail(email=addr))
+    _print_json(_client(ctx).users_lookupByEmail(email=addr))
 
 
-@query_cmd.command("files-info")
+@query_cmd.command("files-info", help="files.info")
 @click.argument("file_id")
 @click.pass_context
 def query_files_info(ctx: click.Context, file_id: str) -> None:
-    from ssd.dumpapi import DumpClient
-
-    _print_json(DumpClient(ctx.obj["output"]).files_info(file=file_id))
+    _print_json(_client(ctx).files_info(file=file_id))
 
 
-@query_cmd.command("usergroup-users")
+@query_cmd.command("usergroup-users", help="usergroups.users; --search filters")
 @click.argument("handle")
 @click.option("--search", default=None)
 @click.option("--limit", default=None, type=int)
@@ -1376,9 +1334,7 @@ def query_usergroup_users(
     limit: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     kwargs: dict[str, Any] = {"usergroup": handle}
     if limit is not None:
         kwargs["limit"] = limit
@@ -1390,7 +1346,7 @@ def query_usergroup_users(
     _print_json(client.usergroups_users(**kwargs))
 
 
-@query_cmd.command("calls")
+@query_cmd.command("calls", help="calls.list / info; --search filters")
 @click.argument("call_id", required=False)
 @click.option("--search", default=None)
 @click.option("--count", default=None, type=int)
@@ -1405,9 +1361,7 @@ def query_calls(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if search:
         kwargs: dict[str, Any] = {"query": search}
         if count is not None:
@@ -1424,35 +1378,31 @@ def query_calls(
     _print_json(client.calls_list(count=count, page=page, cursor=cursor))
 
 
-@query_cmd.command("participants")
+@query_cmd.command("participants", help="calls.participants; --search filters")
 @click.argument("call_id")
 @click.option("--search", default=None)
 @click.pass_context
 def query_participants(ctx: click.Context, call_id: str, search: str | None) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if search:
         _print_json(client.calls_participants_search(id=call_id, query=search))
         return
     _print_json(client.calls_participants(id=call_id))
 
 
-@query_cmd.command("billable")
+@query_cmd.command("billable", help="team.billableInfo; --search filters")
 @click.option("--search", default=None)
 @click.option("--user", default=None)
 @click.pass_context
 def query_billable(ctx: click.Context, search: str | None, user: str | None) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if search:
         _print_json(client.team_billableInfo_search(query=search, user=user))
         return
     _print_json(client.team_billableInfo(user=user))
 
 
-@query_cmd.command("integration-logs")
+@query_cmd.command("integration-logs", help="team.integrationLogs; --search filters")
 @click.option("--search", default=None)
 @click.option("--user", default=None)
 @click.option("--change-type", default=None)
@@ -1471,9 +1421,7 @@ def query_integration_logs(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if search:
         kwargs: dict[str, Any] = {
             "query": search,
@@ -1501,7 +1449,7 @@ def query_integration_logs(
     )
 
 
-@query_cmd.command("bookmarks")
+@query_cmd.command("bookmarks", help="bookmarks.list / info; --search filters")
 @click.argument("channel", required=False)
 @click.option("--search", default=None)
 @click.option("--count", default=None, type=int)
@@ -1516,9 +1464,7 @@ def query_bookmarks(
     page: int | None,
     cursor: str | None,
 ) -> None:
-    from ssd.dumpapi import DumpClient
-
-    client = DumpClient(ctx.obj["output"])
+    client = _client(ctx)
     if channel and channel.startswith("Bk"):
         _print_json(client.bookmarks_info(bookmark=channel))
         return
@@ -1537,38 +1483,32 @@ def query_bookmarks(
     )
 
 
-@query_cmd.command("permalink")
+@query_cmd.command("permalink", help="chat.getPermalink")
 @click.argument("channel")
 @click.argument("ts")
 @click.pass_context
 def query_permalink(ctx: click.Context, channel: str, ts: str) -> None:
-    from ssd.dumpapi import DumpClient
-
     _print_json(
-        DumpClient(ctx.obj["output"]).chat_getPermalink(channel=channel, message_ts=ts)
+        _client(ctx).chat_getPermalink(channel=channel, message_ts=ts)
     )
 
 
-@query_cmd.command("api")
+@query_cmd.command("api", help="Call a DumpClient method by Slack name (key=value)")
 @click.argument("method")
 @click.argument("args", nargs=-1)
 @click.pass_context
 def query_api(ctx: click.Context, method: str, args: tuple[str, ...]) -> None:
-    from ssd.dumpapi import DumpClient
-
     payload: dict[str, Any] = {}
     for item in args:
         key, sep, val = item.partition("=")
         if not sep:
             raise click.UsageError(f"expected key=value, got {item}")
         payload[key] = val
-    _print_json(DumpClient(ctx.obj["output"]).api_call(method, params=payload))
+    _print_json(_client(ctx).api_call(method, params=payload))
 
 
-@query_cmd.command("migration")
+@query_cmd.command("migration", help="migration.exchange")
 @click.argument("users")
 @click.pass_context
 def query_migration(ctx: click.Context, users: str) -> None:
-    from ssd.dumpapi import DumpClient
-
-    _print_json(DumpClient(ctx.obj["output"]).migration_exchange(users=users))
+    _print_json(_client(ctx).migration_exchange(users=users))

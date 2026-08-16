@@ -20,10 +20,12 @@ Dump Slack channels and threads to JSON and Markdown. No OAuth setup. No bot tok
 
 | Requirement | Why |
 |---|---|
-| macOS | Token extraction reads Slack's local app data |
-| [Slack desktop app](https://slack.com/downloads/mac), signed in | Source of the `xoxc-` API token |
+| macOS | `ssd token` / live dump read Slack's local app data |
+| [Slack desktop app](https://slack.com/downloads/mac), signed in | Source of the `xoxc-` API token (dump only) |
 | Python 3.11+ | Runtime |
 | [uv](https://docs.astral.sh/uv/) | Dependency/tool management |
+
+`ssd query` and `DumpClient` run on any OS that can read the dump (or an official Slack export). No token needed for query.
 
 Chrome or Firefox is needed for cookie extraction on newer Slack. Older Slack versions store the cookie in plaintext in Slack's own Cookies file, so no browser is required in that case.
 
@@ -77,7 +79,15 @@ members.json      # roster
 pins.json bookmarks.json reactions.json files.json calls.json threads.json stats.json
 ```
 
-Workspace sidecars land next to the channel dirs (`users.json`, `conversations.json`, `emoji.json`, `auth.json`, `team.json`, and others). Query commands read those files instead of calling Slack.
+Workspace sidecars land next to the channel dirs. Written once per workspace, reused by `ssd query`:
+
+```
+auth.json users.json conversations.json emoji.json emoji_categories.json
+usergroups.json stars.json reminders.json dnd.json team.json team_profile.json
+team_preferences.json scheduled_messages.json files.json remote_files.json
+presence.json billable_info.json integration_logs.json access_logs.json
+external_teams.json teams.json bots.json
+```
 
 Progress output:
 
@@ -192,7 +202,7 @@ Output in `<channel_dir>/thread_1234567890_123456/thread.json` and `thread.md`. 
 
 ## Query local dumps
 
-Reads `./output` (or `--output`). No `api.slack.com`. Same JSON shape as slack_sdk Web API methods.
+Reads `./output` (or `--output`). No `api.slack.com`. JSON shape matches slack_sdk Web API methods. Opens an ssd dump root, a workspace dir, a single channel dir, or an official Slack export (daily `YYYY-MM-DD.json` files).
 
 ```bash
 ssd query search "from:alice has:file after:yesterday"
@@ -202,10 +212,33 @@ ssd query channels --search eng
 ssd query users --search alice
 ssd query files --search report.pdf
 ssd query message C0XXXXXXXXX 1717200000.000100
+ssd query export messages.jsonl
 ssd query api conversations.history channel=C0XXXXXXXXX
 ```
 
-`--search TERM` on a list command filters that sidecar (users, channels, files, emoji, pins, and the rest). `ssd query --help` lists subcommands.
+A positional id looks up one object. `--search TERM` filters the list. Info wins if both are present. `ssd query --help` lists every subcommand.
+
+On a TTY, query prints indented JSON. Pipes stay one line. A Slack-shaped `{"ok": false}` payload still prints, then exits 1. A missing `--output` path is a usage error. An empty dump prints JSON and a stderr hint.
+
+| Group | Commands |
+|---|---|
+| Messages | `search` `history` `replies` `message` `threads` `export` |
+| People | `users` `profile` `email` `identity` `members` `convos` `usergroups` `usergroup-users` `presence` `migration` |
+| Channels | `channels` `cursor` `stats` |
+| Files | `files` `files-info` `remote-files` `comments` |
+| Channel extras | `emoji` `pins` `stars` `bookmarks` `reactions` `calls` `participants` `scheduled` `reminders` `bots` |
+| Team | `team` `team-profile` `prefs` `auth` `teams` `external-teams` `access-logs` `integration-logs` `billable` `dnd` `rtm` |
+| Raw | `api` `permalink` |
+
+Search (`ssd query search`, `search.messages`, `search.files`, `search.all`): substring plus `from:` `in:` `to:` `with:` `has:` `is:` `before:` `after:` `around:` `on:` `during:`, `from:me` / `to:me` / `with:me` / `in:me`, and `-term` exclusion. Relative dates on after/before/during: `today` `yesterday` `week` `month` `year` `lastweek` `lastmonth` `lastyear`. `has::emoji:` matches a named reaction.
+
+`has:` file, reaction, pin, link, canvas, image, video, audio, snippet, attachment, mention, space, block, email, call, x_files, pdf, replies, spreadsheet, metadata, remote, zip, presentation, list, doc, txt, button, gif, json, csv, xml, md, yaml, toml, html, svg, python, js, ts, go, rust, sql, css, sh, workflow, star.
+
+`is:` on messages: thread, bot, starred/saved, edited, unthreaded, broadcast, locked, tombstone/deleted, app, file_share, me, hidden, join, leave, topic, purpose, parent, archive, unarchive, rename, subscribed, pinned, workflow, call/huddle, ephemeral, creator, delayed, scheduled, guest, admin, owner, app_user, me_message, stranger, invited, primary_owner, ultra_restricted, canvas, forgotten, enterprise, moved, connector, workflow_bot.
+
+`is:` on channels (other channels skipped before parse): dm/im, mpim, channel, group, private, public, shared, ext_shared, org_shared, general, pending_ext_shared, member, open, org_default, frozen, global_shared, org_mandatory, read_only, thread_only, non_threadable, user_deleted, muted, unreads, pending_shared, has_canvas, im_blocked, connected, unlinked, internal, host, connected_limited, archived.
+
+Pairs that are not aliases: `is:me` (authed user) vs `is:me_message` (`/me` subtype); `is:archive` (subtype) vs `is:archived` (channel flag); `is:app` vs `is:app_user`; `is:canvas` vs `is:has_canvas`; `is:pending_shared` vs `is:pending_ext_shared`; `is:workflow` vs `is:workflow_bot`; `is:connected` vs `is:connected_limited`. `is:starred` is a starred message, not channel `is_starred`.
 
 Python:
 
@@ -218,7 +251,7 @@ client.search_messages(query="from:alice has:file after:yesterday")
 client.api_call("conversations.history", params={"channel": "C0XXXXXXXXX"})
 ```
 
-`DumpClient` also opens a workspace dir, a single channel dir, or an official Slack export. Search modifiers (`from:`, `in:`, `has:`, `is:`, dates, `-term`) are documented on the `ssd.dumpapi` module.
+`api_call` maps `conversations.history` to `conversations_history`. Unknown methods return `{"ok": false, "error": "unknown_method"}`. Write methods are not implemented.
 
 ## Communication graph
 
@@ -295,6 +328,9 @@ Use the channel URL or bare ID instead. Name-based lookup pages through `convers
 
 **Attachments show as URL links instead of local file links in Markdown:**
 The download failed (likely a permissions issue or the file was deleted from Slack). Re-run with `--attachments` to retry.
+
+**`ssd query` shows no channels:**
+`--output` must point at the dump root (default `./output`), a workspace directory, a channel directory, or an official Slack export. Query never calls Slack, so an empty dir stays empty.
 
 ## Development
 
