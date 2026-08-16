@@ -158,6 +158,36 @@ def test_enrich_bot_message_no_user(mock_client):
     mock_client.users_info.assert_not_called()
 
 
+def test_enrich_preserves_subtype_bot_id_blocks_pinned(mock_client):
+    api = SlackAPI("xoxd-fake", delay=0)
+    messages = [
+        {
+            "ts": "1.0",
+            "user": "U1",
+            "text": "bot post",
+            "subtype": "bot_message",
+            "bot_id": "B99",
+            "app_id": "A99",
+            "blocks": [{"type": "section"}],
+            "pinned_to": ["C123"],
+            "edited": {"ts": "1.1", "user": "U1"},
+            "reply_count": 0,
+            "reactions": [],
+            "files": [],
+        }
+    ]
+    mock_client.users_info.return_value = {
+        "user": {"profile": {"display_name_normalized": "alice", "real_name": "Alice"}}
+    }
+    result = api.enrich("C123", messages)[0]
+    assert result["subtype"] == "bot_message"
+    assert result["bot_id"] == "B99"
+    assert result["app_id"] == "A99"
+    assert result["blocks"] == [{"type": "section"}]
+    assert result["pinned_to"] == ["C123"]
+    assert result["edited"]["ts"] == "1.1"
+
+
 def test_get_workspace_raises_on_empty_domain(mock_client):
     """get_workspace should raise RuntimeError when no domain can be derived."""
     mock_client.auth_test.return_value = {"ok": True, "url": ""}

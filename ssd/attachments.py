@@ -35,25 +35,22 @@ def _enrich_file(f: dict[str, Any], ts: str, att_dir: Path, token: str) -> dict[
     url = f.get("url_private_download") or f.get("url_private") or ""
     raw_name = f.get("name") or f.get("title") or f.get("id") or "unknown"
     name = _safe_name(raw_name)
+    out = dict(f)
+    out["name"] = name
+    out["mimetype"] = f.get("mimetype", "")
     if not url:
-        return {
-            "name": name,
-            "url": "",
-            "local_path": "",
-            "mimetype": f.get("mimetype", ""),
-            "size": 0,
-        }
+        out["url"] = ""
+        out["local_path"] = ""
+        out["size"] = 0
+        return out
     att_dir.mkdir(parents=True, exist_ok=True)
     ts_prefix = ts.replace(".", "_")
     dest = att_dir / f"{ts_prefix}_{name}"
     local_path = _download_file(url, dest, f.get("size"), token)
-    return {
-        "name": name,
-        "url": url,
-        "local_path": local_path,
-        "mimetype": f.get("mimetype", ""),
-        "size": f.get("size") or 0,
-    }
+    out["url"] = url
+    out["local_path"] = local_path
+    out["size"] = f.get("size") or 0
+    return out
 
 
 def download_attachments(

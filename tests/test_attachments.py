@@ -72,6 +72,7 @@ def test_download_noop_for_messages_without_files(tmp_path):
 
 def test_safe_name_strips_dotdot():
     from ssd.attachments import _safe_name
+
     result = _safe_name("../../etc/passwd")
     assert ".." not in result
     assert "/" not in result
@@ -79,16 +80,50 @@ def test_safe_name_strips_dotdot():
 
 def test_safe_name_null_byte():
     from ssd.attachments import _safe_name
+
     result = _safe_name("file\x00name.pdf")
     assert "\x00" not in result
 
 
 def test_safe_name_single_dot_returns_file():
     from ssd.attachments import _safe_name
+
     # A lone "." becomes empty after lstrip("."), so "file" is returned
     assert _safe_name(".") == "file"
 
 
 def test_safe_name_normal_name_unchanged():
     from ssd.attachments import _safe_name
+
     assert _safe_name("report.pdf") == "report.pdf"
+
+
+def test_download_preserves_file_id(tmp_path):
+    messages = [
+        {
+            "ts": "1705320720.000000",
+            "user_name": "alice",
+            "text": "see attached",
+            "reactions": [],
+            "thread": [],
+            "files": [
+                {
+                    "id": "F123ABC",
+                    "name": "report.pdf",
+                    "url_private_download": "https://files.slack.com/files/report.pdf",
+                    "mimetype": "application/pdf",
+                    "size": 1024,
+                    "user": "U001",
+                }
+            ],
+        }
+    ]
+    with patch("ssd.attachments.requests.get") as mock_get:
+        mock_get.return_value = MagicMock(
+            status_code=200, iter_content=lambda chunk_size: [b"pdfdata"]
+        )
+        result = download_attachments(tmp_path, messages, "xoxd-fake")
+    f = result[0]["files"][0]
+    assert f["id"] == "F123ABC"
+    assert f["user"] == "U001"
+    assert f["local_path"]

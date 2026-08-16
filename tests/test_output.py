@@ -7,6 +7,7 @@ from ssd.output import (
     read_cursor,
     write_cursor,
     write_messages,
+    write_users,
 )
 
 MSG_A = {
@@ -95,3 +96,21 @@ def test_write_messages_creates_md(tmp_path):
     write_messages(tmp_path, [MSG_A])
     md = (tmp_path / "messages.md").read_text()
     assert "alice" in md
+
+
+def test_write_users(tmp_path):
+    write_users(
+        tmp_path,
+        {
+            "U2": {"id": "U2", "display_name": "bob"},
+            "U1": {"id": "U1", "display_name": "alice"},
+        },
+    )
+    data = json.loads((tmp_path / "users.json").read_text())
+    assert list(data) == ["U1", "U2"]
+    assert data["U1"]["display_name"] == "alice"
+
+
+def test_write_users_skips_empty(tmp_path):
+    write_users(tmp_path, {})
+    assert not (tmp_path / "users.json").exists()

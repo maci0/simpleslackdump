@@ -8,6 +8,17 @@ from slack_sdk import WebClient
 
 _ID_RE = re.compile(r"^[CDG][A-Z0-9a-z]+$")
 _MENTION_RE = re.compile(r"<@([A-Z0-9a-z]+)>")
+_PASSTHROUGH = (
+    "subtype",
+    "bot_id",
+    "app_id",
+    "username",
+    "edited",
+    "blocks",
+    "attachments",
+    "pinned_to",
+    "pinned_info",
+)
 
 
 def _url_encode_cookie(cookie: str) -> str:
@@ -165,7 +176,7 @@ class SlackAPI:
         """Enrich a single reply dict — name resolution and mention substitution only,
         no recursive thread fetch (replies don't have sub-threads)."""
         user_id = r.get("user", "")
-        return {
+        out = {
             "ts": r["ts"],
             "user": user_id,
             "user_name": self.get_user_name(user_id) if user_id else "unknown",
@@ -176,6 +187,10 @@ class SlackAPI:
             ],
             "files": r.get("files", []),
         }
+        for key in _PASSTHROUGH:
+            if key in r:
+                out[key] = r[key]
+        return out
 
     def enrich(self, channel_id: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result = []
