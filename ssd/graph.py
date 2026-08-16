@@ -93,7 +93,9 @@ def _mention_candidates(raw: str) -> list[str]:
 
 
 def render_html(graph: dict[str, Any], title: str = "Communication Graph") -> str:
-    data_json = json.dumps(graph).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    data_json = (
+        json.dumps(graph).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    )
     channels_str = ", ".join(graph["channels"]) if graph["channels"] else "unknown"
     n_nodes = len(graph["nodes"])
     n_links = len(graph["links"])

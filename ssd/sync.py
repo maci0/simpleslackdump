@@ -5,8 +5,10 @@ from pathlib import Path
 import click
 
 from ssd.api import SlackAPI
+from ssd.dump import _write_sidecars, write_channel_stats
 from ssd.output import (
     _atomic_write,
+    _dumps,
     channel_dir,
     format_markdown,
     merge_messages,
@@ -53,7 +55,9 @@ def _refresh_old_threads(
         new_raw = [r for r in new_raw if float(r["ts"]) > float(latest_reply_ts)]
         if not new_raw:
             continue
-        new_enriched = [api.enrich_reply(r) for r in new_raw]  # collect fully before mutating
+        new_enriched = [
+            api.enrich_reply(r, channel_id=channel_id) for r in new_raw
+        ]  # collect fully before mutating
         if attachments_enabled and token:
             from ssd.attachments import download_attachments
 
@@ -73,8 +77,7 @@ def _refresh_old_threads(
             # Merge file info back into new_enriched
             file_map = {m["ts"]: m.get("files", []) for m in downloaded}
             new_enriched = [
-                {**r, "files": file_map.get(r["ts"], r.get("files", []))}
-                for r in new_enriched
+                {**r, "files": file_map.get(r["ts"], r.get("files", []))} for r in new_enriched
             ]
         msg["thread"].extend(new_enriched)
         msg["thread"].sort(key=lambda r: float(r["ts"]))
@@ -125,7 +128,7 @@ def run_sync(
         if not raw_replies:
             click.echo("  no new replies")
             return
-        enriched = [api.enrich_reply(r) for r in raw_replies]
+        enriched = [api.enrich_reply(r, channel_id=channel_id) for r in raw_replies]
         if attachments_enabled and token:
             from ssd.attachments import download_attachments
 
@@ -139,12 +142,11 @@ def run_sync(
         for m in enriched:
             by_ts[m["ts"]] = m
         sorted_msgs = sorted(by_ts.values(), key=lambda m: float(m["ts"]))
-        _atomic_write(
-            thread_dir / "thread.json", json.dumps(sorted_msgs, indent=2, ensure_ascii=False)
-        )
+        _atomic_write(thread_dir / "thread.json", _dumps(sorted_msgs))
         _atomic_write(thread_dir / "thread.md", format_markdown(sorted_msgs))
         write_cursor(thread_dir, max(m["ts"] for m in enriched))
         write_users(thread_dir, api.get_user_profiles())
+        _write_sidecars(api, out_dir, channel_id)
         click.echo(f"  thread {parsed.thread_ts}: {len(enriched)} new replies")
         return
 
@@ -191,3 +193,5 @@ def run_sync(
         )
 
     write_users(out_dir, api.get_user_profiles())
+    _write_sidecars(api, out_dir, channel_id)
+    write_channel_stats(out_dir)

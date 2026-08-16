@@ -84,8 +84,7 @@ def _from_chrome_storage() -> str | None:
     Useful when the Slack desktop app isn't installed but Slack is open in Chrome.
     """
     chrome_ldb = (
-        Path.home()
-        / "Library/Application Support/Google/Chrome/Default/Local Storage/leveldb"
+        Path.home() / "Library/Application Support/Google/Chrome/Default/Local Storage/leveldb"
     )
     return _scan_ldb_dir(chrome_ldb) if chrome_ldb.exists() else None
 
@@ -158,8 +157,7 @@ def extract_token() -> str:
         if result:
             return result
     raise RuntimeError(
-        "Could not extract Slack token. "
-        "Open Slack (desktop app or Chrome) and try again."
+        "Could not extract Slack token. Open Slack (desktop app or Chrome) and try again."
     )
 
 

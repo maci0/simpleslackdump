@@ -45,6 +45,7 @@ def test_sync_since_overrides_cursor(tmp_path, mock_api):
     call_args = mock_api.get_messages.call_args
     # since="2024-02-01" -> unix ts 1706745600.0; verify cursor was not used
     import pytest
+
     assert float(call_args[1]["oldest"]) == pytest.approx(1706745600.0, rel=1e-3)
 
 
@@ -65,6 +66,8 @@ def test_sync_merges_with_existing(tmp_path, mock_api):
     run_sync(mock_api, "testteam", "C123", str(tmp_path), since=None)
     data = json.loads((out_dir / "messages.json").read_text())
     assert len(data) == 2
+    stats = json.loads((out_dir / "stats.json").read_text())
+    assert stats["messages"] == 2
 
 
 def test_sync_updates_cursor(tmp_path, mock_api):
@@ -129,6 +132,7 @@ def test_refresh_old_threads_picks_up_new_replies(tmp_path, mock_api):
     _refresh_old_threads(mock_api, "C123", out_dir, "1705320750.000000")
 
     import json
+
     stored = json.loads((out_dir / "messages.json").read_text())
     thread = stored[0]["thread"]
     assert len(thread) == 2
@@ -153,13 +157,19 @@ def test_refresh_old_threads_skips_messages_with_empty_thread(tmp_path, mock_api
 
     out_dir = channel_dir(str(tmp_path), "testteam", "general", "C123")
     # Message with empty thread
-    write_messages(out_dir, [{
-        "ts": "1705320720.000000",
-        "user_name": "alice",
-        "text": "top msg",
-        "reactions": [], "files": [],
-        "thread": [],  # no prior replies
-    }])
+    write_messages(
+        out_dir,
+        [
+            {
+                "ts": "1705320720.000000",
+                "user_name": "alice",
+                "text": "top msg",
+                "reactions": [],
+                "files": [],
+                "thread": [],  # no prior replies
+            }
+        ],
+    )
 
     mock_api.get_replies.return_value = []
     _refresh_old_threads(mock_api, "C123", out_dir, "1705320750.000000")

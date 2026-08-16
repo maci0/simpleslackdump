@@ -24,6 +24,70 @@ def mock_api():
             "thread": [],
         }
     ]
+    api.get_channel_info.return_value = {
+        "id": "C123",
+        "name": "general",
+        "topic": "talk",
+        "purpose": "chat",
+        "is_private": False,
+        "created": 1,
+        "num_members": 2,
+        "creator": "U1",
+    }
+    api.get_channel_members.return_value = ["U1", "U2"]
+    api.get_emoji.return_value = {"shipit": "https://emoji.test/shipit.png"}
+    api.get_emoji_categories.return_value = [{"name": "Custom", "emoji_names": ["shipit"]}]
+    api.get_auth.return_value = {
+        "ok": True,
+        "url": "https://testteam.slack.com/",
+        "team": "testteam",
+        "team_id": "T1",
+        "user": "alice",
+        "user_id": "U1",
+    }
+    api.get_bookmarks.return_value = [{"id": "Bk1", "title": "docs", "type": "link"}]
+    api.get_pins.return_value = [{"type": "message", "channel": "C123"}]
+    api.get_usergroups.return_value = [{"id": "S1", "handle": "eng"}]
+    api.fetch_workspace_users.return_value = {
+        "U1": {
+            "id": "U1",
+            "handle": "alice",
+            "display_name": "alice",
+            "real_name": "Alice",
+            "title": "",
+            "email": "alice@test",
+            "phone": "",
+            "status_text": "",
+            "status_emoji": "",
+            "timezone": "",
+            "timezone_label": "",
+            "is_bot": False,
+            "image": "",
+        }
+    }
+    api.list_conversations.return_value = [
+        {"id": "C123", "name": "general", "is_private": False, "is_channel": True}
+    ]
+    api.get_stars.return_value = [{"type": "message", "channel": "C123"}]
+    api.get_reminders.return_value = [{"id": "Rm1", "text": "ping"}]
+    api.get_dnd.return_value = {"U1": {"dnd_enabled": False}}
+    api.get_team_profile.return_value = {"fields": [{"id": "Xf1", "label": "Title"}]}
+    api.get_scheduled_messages.return_value = [{"id": "Q1", "channel_id": "C123", "text": "later"}]
+    api.get_team_info.return_value = {
+        "id": "T1",
+        "name": "testteam",
+        "domain": "testteam",
+        "email_domain": "test",
+    }
+    api.get_files.return_value = [{"id": "Fws", "name": "workspace.png"}]
+    api.get_presence.return_value = {"presence": "active", "online": True}
+    api.get_billable_info.return_value = {"U1": {"billing_active": True}}
+    api.get_integration_logs.return_value = [{"user_id": "U1", "service_id": "S1"}]
+    api.get_access_logs.return_value = [{"user_id": "U1", "ip": "1.1.1.1"}]
+    api.get_team_preferences.return_value = {"msg_edit_window_mins": "0"}
+    api.get_external_teams.return_value = [{"id": "E1", "name": "Partner"}]
+    api.get_auth_teams.return_value = [{"id": "T1", "name": "testteam"}]
+    api.get_remote_files.return_value = [{"id": "Fr1", "name": "drive.doc", "is_external": True}]
     return api
 
 
@@ -47,6 +111,107 @@ def test_run_dump_cursor_is_latest_ts(tmp_path, mock_api):
     out_dir = tmp_path / "testteam" / "general_C123"
     cursor = (out_dir / ".cursor").read_text().strip()
     assert cursor == "1705320720.000000"
+
+
+def test_run_dump_writes_sidecars(tmp_path, mock_api):
+    run_dump(mock_api, "testteam", "C123", str(tmp_path))
+    out_dir = tmp_path / "testteam" / "general_C123"
+    channel = json.loads((out_dir / "channel.json").read_text())
+    assert channel["topic"] == "talk"
+    assert json.loads((out_dir / "members.json").read_text()) == ["U1", "U2"]
+    assert json.loads((tmp_path / "testteam" / "emoji.json").read_text())["shipit"].startswith(
+        "https://"
+    )
+    auth = json.loads((tmp_path / "testteam" / "auth.json").read_text())
+    assert auth["team_id"] == "T1"
+    assert json.loads((out_dir / "bookmarks.json").read_text())[0]["id"] == "Bk1"
+    assert json.loads((out_dir / "pins.json").read_text())[0]["type"] == "message"
+    assert json.loads((tmp_path / "testteam" / "usergroups.json").read_text())[0]["handle"] == "eng"
+    assert "U1" in json.loads((tmp_path / "testteam" / "users.json").read_text())
+    assert json.loads((tmp_path / "testteam" / "conversations.json").read_text())[0]["id"] == "C123"
+    assert json.loads((tmp_path / "testteam" / "stars.json").read_text())[0]["type"] == "message"
+    assert json.loads((tmp_path / "testteam" / "reminders.json").read_text())[0]["id"] == "Rm1"
+    dnd = json.loads((tmp_path / "testteam" / "dnd.json").read_text())
+    assert dnd["U1"]["dnd_enabled"] is False
+    assert json.loads((tmp_path / "testteam" / "team_profile.json").read_text())["fields"][0][
+        "id"
+    ] == "Xf1"
+    assert json.loads((tmp_path / "testteam" / "scheduled_messages.json").read_text())[0][
+        "id"
+    ] == "Q1"
+    assert json.loads((tmp_path / "testteam" / "team.json").read_text())["id"] == "T1"
+    assert json.loads((tmp_path / "testteam" / "files.json").read_text())[0]["id"] == "Fws"
+    presence = json.loads((tmp_path / "testteam" / "presence.json").read_text())
+    assert presence["U1"]["presence"] == "active"
+    billable = json.loads((tmp_path / "testteam" / "billable_info.json").read_text())
+    assert billable["U1"]["billing_active"] is True
+    logs = json.loads((tmp_path / "testteam" / "integration_logs.json").read_text())
+    assert logs[0]["service_id"] == "S1"
+    access = json.loads((tmp_path / "testteam" / "access_logs.json").read_text())
+    assert access[0]["ip"] == "1.1.1.1"
+    prefs = json.loads((tmp_path / "testteam" / "team_preferences.json").read_text())
+    assert prefs["msg_edit_window_mins"] == "0"
+    ext = json.loads((tmp_path / "testteam" / "external_teams.json").read_text())
+    assert ext[0]["id"] == "E1"
+    teams = json.loads((tmp_path / "testteam" / "teams.json").read_text())
+    assert teams[0]["id"] == "T1"
+    remote = json.loads((tmp_path / "testteam" / "remote_files.json").read_text())
+    assert remote[0]["id"] == "Fr1"
+    cats = json.loads((tmp_path / "testteam" / "emoji_categories.json").read_text())
+    assert cats[0]["name"] == "Custom"
+    stats = json.loads((out_dir / "stats.json").read_text())
+    assert stats["messages"] == 1
+    assert stats["replies"] == 0
+    assert json.loads((out_dir / "reactions.json").read_text()) == []
+    assert json.loads((out_dir / "files.json").read_text()) == []
+    assert json.loads((out_dir / "calls.json").read_text()) == []
+    assert json.loads((out_dir / "threads.json").read_text()) == []
+
+
+def test_write_channel_stats_writes_reactions(tmp_path):
+    from ssd.dump import write_channel_stats
+
+    out_dir = tmp_path / "acme" / "general_C123"
+    out_dir.mkdir(parents=True)
+    write_channel_stats(
+        out_dir,
+        [
+            {
+                "ts": "1.0",
+                "user": "U1",
+                "text": "hi",
+                "reactions": [{"name": "thumbsup", "users": ["U2"], "count": 1}],
+                "thread": [
+                    {
+                        "ts": "1.1",
+                        "user": "U3",
+                        "text": "yo",
+                        "reactions": [{"name": "heart", "users": ["U1"], "count": 1}],
+                    }
+                ],
+                "files": [{"id": "F1", "name": "a.png", "filetype": "png"}],
+                "room": {"id": "R1", "name": "standup"},
+            }
+        ],
+    )
+    rows = json.loads((out_dir / "reactions.json").read_text())
+    assert {(r["reaction"], r["user"]) for r in rows} == {("thumbsup", "U2"), ("heart", "U1")}
+    assert all(r["channel"] == "C123" for r in rows)
+    files = json.loads((out_dir / "files.json").read_text())
+    assert [f["id"] for f in files] == ["F1"]
+    calls = json.loads((out_dir / "calls.json").read_text())
+    assert [c["id"] for c in calls] == ["R1"]
+    threads = json.loads((out_dir / "threads.json").read_text())
+    assert threads == [
+        {
+            "channel": "C123",
+            "thread_ts": "1.0",
+            "reply_count": 1,
+            "latest_reply": "1.1",
+            "reply_users": ["U3"],
+            "reply_users_count": 1,
+        }
+    ]
 
 
 def test_run_dump_resolves_channel_name(tmp_path, mock_api):
@@ -73,4 +238,37 @@ def test_run_dump_thread_url(tmp_path, mock_api):
         str(tmp_path),
     )
     mock_api.get_replies.assert_called_once()
-    mock_api.enrich_reply.assert_called_once_with(raw_reply)
+    mock_api.enrich_reply.assert_called_once_with(raw_reply, channel_id="C123")
+
+
+def test_run_dump_writes_bots(tmp_path, mock_api):
+    mock_api.enrich.return_value = [
+        {
+            "ts": "1705320720.000000",
+            "user": "B99",
+            "user_name": "deploybot",
+            "bot_id": "B99",
+            "app_id": "A1",
+            "username": "deploybot",
+            "bot_profile": {
+                "id": "B99",
+                "name": "deploybot",
+                "app_id": "A1",
+                "icons": {"image_48": "https://e.test/b.png"},
+                "team_id": "T1",
+                "updated": 9,
+                "is_workflow_bot": True,
+            },
+            "text": "shipped",
+            "reactions": [],
+            "thread": [],
+        }
+    ]
+    run_dump(mock_api, "testteam", "C123", str(tmp_path))
+    bots = json.loads((tmp_path / "testteam" / "bots.json").read_text())
+    assert bots["B99"]["name"] == "deploybot"
+    assert bots["B99"]["app_id"] == "A1"
+    assert bots["B99"]["icons"]["image_48"].endswith("/b.png")
+    assert bots["B99"]["team_id"] == "T1"
+    assert bots["B99"]["updated"] == 9
+    assert bots["B99"]["is_workflow_bot"] is True

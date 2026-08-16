@@ -1,7 +1,7 @@
 [project]
 name = "ssd"
 version = "0.1.0"
-description = "simpleslackdump - dump Slack channels to JSON/Markdown"
+description = "simpleslackdump - dump Slack channels to JSON/Markdown and query the dump locally"
 requires-python = ">=3.11"
 dependencies = [
     "slack-sdk>=3.27",
@@ -9,6 +9,7 @@ dependencies = [
     "tomlkit>=0.13",
     "requests>=2.31",
     "cryptography>=42.0",
+    "orjson>=3.12.0",
 ]
 
 [project.optional-dependencies]

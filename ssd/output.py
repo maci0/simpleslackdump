@@ -6,6 +6,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+try:
+    import orjson as _fastjson
+except ImportError:
+    _fastjson = None
+
 
 def channel_dir(output_root: str, workspace: str, channel_name: str, channel_id: str) -> Path:
     return Path(output_root) / workspace / f"{channel_name}_{channel_id}"
@@ -49,6 +54,19 @@ def format_markdown(messages: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _dumps(data: Any) -> str:
+    if _fastjson is not None:
+        return _fastjson.dumps(data).decode()
+    return json.dumps(data, ensure_ascii=False)
+
+
+def _loads_path(path: Path) -> Any:
+    raw = path.read_bytes()
+    if _fastjson is not None:
+        return _fastjson.loads(raw)
+    return json.loads(raw)
+
+
 def _atomic_write(path: Path, content: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp_")
     try:
@@ -68,7 +86,7 @@ def write_messages(dir: Path, messages: list[dict[str, Any]]) -> None:
     sorted_msgs = sorted(messages, key=lambda m: float(m["ts"]))
     json_path = dir / "messages.json"
     md_path = dir / "messages.md"
-    _atomic_write(json_path, json.dumps(sorted_msgs, indent=2, ensure_ascii=False))
+    _atomic_write(json_path, _dumps(sorted_msgs))
     _atomic_write(md_path, format_markdown(sorted_msgs))
 
 
@@ -76,7 +94,7 @@ def merge_messages(dir: Path, new_messages: list[dict[str, Any]]) -> None:
     json_path = dir / "messages.json"
     existing: list[dict[str, Any]] = []
     if json_path.exists():
-        existing = json.loads(json_path.read_text())
+        existing = _loads_path(json_path)
     by_ts: dict[str, dict[str, Any]] = {m["ts"]: m for m in existing}
     for m in new_messages:
         by_ts[m["ts"]] = m
@@ -103,4 +121,9 @@ def write_users(dir: Path, profiles: dict[str, Any]) -> None:
         sorted(profiles.items(), key=lambda kv: kv[1].get("display_name") or kv[0])
     )
     dir.mkdir(parents=True, exist_ok=True)
-    _atomic_write(dir / "users.json", json.dumps(sorted_profiles, indent=2, ensure_ascii=False))
+    _atomic_write(dir / "users.json", _dumps(sorted_profiles))
+
+
+def write_json(dir: Path, name: str, data: Any) -> None:
+    dir.mkdir(parents=True, exist_ok=True)
+    _atomic_write(dir / name, _dumps(data))

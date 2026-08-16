@@ -134,15 +134,31 @@ def _make_api(
 
 
 @main.command()
-@click.argument("targets", nargs=-1, required=True)
+@click.argument("targets", nargs=-1, required=False)
+@click.option("--all", "dump_all", is_flag=True, help="Dump every visible conversation")
+@click.option("--dms", "dump_dms", is_flag=True, help="Dump DMs and MPIMs")
 @click.option("--delay", default=None, type=float, help="Override global --delay")
 @click.pass_context
-def dump(ctx: click.Context, targets: tuple[str, ...], delay: float | None) -> None:
+def dump(
+    ctx: click.Context,
+    targets: tuple[str, ...],
+    dump_all: bool,
+    dump_dms: bool,
+    delay: float | None,
+) -> None:
     """Full history dump of channel(s)."""
     from ssd.dump import run_dump
 
     delay = delay if delay is not None else ctx.obj.get("delay", 1.0)
     api, workspace, token, attach = _make_api(ctx.obj, delay)
+    if dump_all or dump_dms:
+        convos = [c for c in api.list_conversations() if c.get("id")]
+        if dump_dms and not dump_all:
+            convos = [c for c in convos if c.get("is_im") or c.get("is_mpim")]
+        targets = tuple(str(c["id"]) for c in convos)
+        click.echo(f"Dumping {len(targets)} conversations...")
+    elif not targets:
+        raise click.UsageError("Provide channel targets, --all, or --dms")
     for target in targets:
         click.echo(f"Dumping {target}...")
         run_dump(api, workspace, target, ctx.obj["output"], token=token, attachments_enabled=attach)
@@ -322,3 +338,1237 @@ def graph(ctx: click.Context, channel_dirs: tuple[str, ...], output: str) -> Non
     Path(output).write_text(html, encoding="utf-8")
     click.echo(f"Graph: {output} — {len(data['nodes'])} users, {len(data['links'])} connections")
     webbrowser.open(f"file://{str(Path(output).resolve())}")
+
+
+def _print_json(data: Any) -> None:
+    try:
+        import orjson
+
+        click.echo(orjson.dumps(data).decode())
+    except ImportError:
+        import json
+
+        click.echo(json.dumps(data, ensure_ascii=False))
+
+
+@main.group("query")
+def query_cmd() -> None:
+    """Read local dump data. No Slack network."""
+
+
+@query_cmd.command("stats")
+@click.pass_context
+def query_stats(ctx: click.Context) -> None:
+    from ssd.dumpapi import DumpClient
+
+    _print_json(DumpClient(ctx.obj["output"]).stats())
+
+
+@query_cmd.command("search")
+@click.argument("q")
+@click.option("--count", default=20, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--sort-dir", default="desc")
+@click.pass_context
+def query_search(
+    ctx: click.Context, q: str, count: int, page: int | None, sort_dir: str
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    _print_json(
+        DumpClient(ctx.obj["output"]).search_all(
+            query=q, count=count, page=page, sort_dir=sort_dir
+        )
+    )
+
+
+@query_cmd.command("history")
+@click.argument("channel")
+@click.option("--search", default=None)
+@click.option("--limit", default=100, type=int)
+@click.option("--oldest", default=None)
+@click.option("--latest", default=None)
+@click.option("--inclusive", is_flag=True)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_history(
+    ctx: click.Context,
+    channel: str,
+    search: str | None,
+    limit: int,
+    oldest: str | None,
+    latest: str | None,
+    inclusive: bool,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    kwargs: dict[str, Any] = {
+        "channel": channel,
+        "limit": limit,
+        "oldest": oldest,
+        "latest": latest,
+        "inclusive": inclusive,
+        "cursor": cursor,
+    }
+    if search:
+        _print_json(client.conversations_history_search(query=search, **kwargs))
+        return
+    _print_json(client.conversations_history(**kwargs))
+
+
+@query_cmd.command("cursor")
+@click.argument("channel", required=False)
+@click.option("--search", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_cursor(
+    ctx: click.Context,
+    channel: str | None,
+    search: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if channel:
+        _print_json(client.get_cursor(channel=channel))
+        return
+    if search:
+        kwargs: dict[str, Any] = {"query": search}
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.cursors_search(**kwargs))
+        return
+    _print_json(client.cursors_list(count=count, page=page, cursor=cursor))
+
+
+@query_cmd.command("channels")
+@click.argument("channel", required=False)
+@click.option("--search", default=None)
+@click.option("--exclude-archived", is_flag=True)
+@click.option("--types", default=None)
+@click.option("--limit", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_channels(
+    ctx: click.Context,
+    channel: str | None,
+    search: str | None,
+    exclude_archived: bool,
+    types: str | None,
+    limit: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if channel:
+        _print_json(client.conversations_info(channel=channel))
+        return
+    if search:
+        kwargs: dict[str, Any] = {
+            "query": search,
+            "exclude_archived": exclude_archived,
+            "types": types,
+        }
+        if limit is not None:
+            kwargs["limit"] = limit
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.conversations_search(**kwargs))
+        return
+    kwargs = {"exclude_archived": exclude_archived, "types": types}
+    if limit is not None:
+        kwargs["limit"] = limit
+    if cursor is not None:
+        kwargs["cursor"] = cursor
+    _print_json(client.conversations_list(**kwargs))
+
+
+@query_cmd.command("users")
+@click.argument("user", required=False)
+@click.option("--search", default=None)
+@click.option("--message-users/--no-message-users", default=True)
+@click.option("--bots/--no-bots", default=True)
+@click.option("--deleted/--no-deleted", default=True)
+@click.option("--limit", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_users(
+    ctx: click.Context,
+    user: str | None,
+    search: str | None,
+    message_users: bool,
+    bots: bool,
+    deleted: bool,
+    limit: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if user:
+        _print_json(client.users_info(user=user))
+        return
+    if search:
+        kwargs: dict[str, Any] = {"query": search}
+        if limit is not None:
+            kwargs["limit"] = limit
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.users_search(**kwargs))
+        return
+    kwargs = {
+        "include_message_users": message_users,
+        "include_bots": bots,
+        "include_deleted": deleted,
+    }
+    if limit is not None:
+        kwargs["limit"] = limit
+    if cursor is not None:
+        kwargs["cursor"] = cursor
+    _print_json(client.users_list(**kwargs))
+
+
+@query_cmd.command("files")
+@click.argument("file", required=False)
+@click.option("--search", default=None)
+@click.option("--channel", default=None)
+@click.option("--user", default=None)
+@click.option("--types", default=None, help="Comma-separated Slack filetypes")
+@click.option("--ts-from", default=None)
+@click.option("--ts-to", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_files(
+    ctx: click.Context,
+    file: str | None,
+    search: str | None,
+    channel: str | None,
+    user: str | None,
+    types: str | None,
+    ts_from: str | None,
+    ts_to: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if file:
+        _print_json(client.files_info(file=file))
+        return
+    kwargs: dict[str, Any] = {
+        "channel": channel,
+        "user": user,
+        "types": types,
+        "ts_from": ts_from,
+        "ts_to": ts_to,
+    }
+    if count is not None:
+        kwargs["count"] = count
+    if page is not None:
+        kwargs["page"] = page
+    if cursor is not None:
+        kwargs["cursor"] = cursor
+    if search:
+        _print_json(client.files_list_search(query=search, **kwargs))
+        return
+    _print_json(client.files_list(**kwargs))
+
+
+@query_cmd.command("remote-files")
+@click.argument("file_id", required=False)
+@click.option("--search", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_remote_files(
+    ctx: click.Context,
+    file_id: str | None,
+    search: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if search:
+        kwargs: dict[str, Any] = {"query": search}
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.files_remote_search(**kwargs))
+        return
+    if file_id:
+        _print_json(client.files_remote_info(file=file_id))
+        return
+    _print_json(client.files_remote_list(count=count, page=page, cursor=cursor))
+
+
+@query_cmd.command("message")
+@click.argument("channel")
+@click.argument("ts")
+@click.pass_context
+def query_message(ctx: click.Context, channel: str, ts: str) -> None:
+    from ssd.dumpapi import DumpClient
+
+    _print_json(DumpClient(ctx.obj["output"]).get_message(channel=channel, ts=ts))
+
+
+@query_cmd.command("export")
+@click.argument("dest", type=click.Path())
+@click.option("--channel", default=None)
+@click.pass_context
+def query_export(ctx: click.Context, dest: str, channel: str | None) -> None:
+    from ssd.dumpapi import DumpClient
+
+    n = DumpClient(ctx.obj["output"]).export_jsonl(dest, channel=channel)
+    click.echo(str(n))
+
+
+@query_cmd.command("emoji")
+@click.argument("name", required=False)
+@click.option("--search", default=None)
+@click.pass_context
+def query_emoji(ctx: click.Context, name: str | None, search: str | None) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if search:
+        _print_json(client.emoji_search(query=search))
+        return
+    if name:
+        _print_json(client.emoji_get(name=name))
+        return
+    _print_json(client.emoji_list())
+
+
+@query_cmd.command("identity")
+@click.pass_context
+def query_identity(ctx: click.Context) -> None:
+    from ssd.dumpapi import DumpClient
+
+    _print_json(DumpClient(ctx.obj["output"]).users_identity())
+
+
+@query_cmd.command("auth")
+@click.pass_context
+def query_auth(ctx: click.Context) -> None:
+    from ssd.dumpapi import DumpClient
+
+    _print_json(DumpClient(ctx.obj["output"]).auth_test())
+
+
+@query_cmd.command("teams")
+@click.option("--search", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_teams(
+    ctx: click.Context,
+    search: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if search:
+        kwargs: dict[str, Any] = {"query": search}
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.auth_teams_search(**kwargs))
+        return
+    _print_json(client.auth_teams_list(count=count, page=page, cursor=cursor))
+
+
+@query_cmd.command("rtm")
+@click.option("--start", is_flag=True)
+@click.pass_context
+def query_rtm(ctx: click.Context, start: bool) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if start:
+        _print_json(client.rtm_start())
+        return
+    _print_json(client.rtm_connect())
+
+
+@query_cmd.command("team-profile")
+@click.option("--search", default=None)
+@click.pass_context
+def query_team_profile(ctx: click.Context, search: str | None) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if search:
+        _print_json(client.team_profile_search(query=search))
+        return
+    _print_json(client.team_profile_get())
+
+
+@query_cmd.command("prefs")
+@click.option("--search", default=None)
+@click.pass_context
+def query_prefs(ctx: click.Context, search: str | None) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if search:
+        _print_json(client.team_preferences_search(query=search))
+        return
+    _print_json(client.team_preferences_list())
+
+
+@query_cmd.command("external-teams")
+@click.option("--search", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_external_teams(
+    ctx: click.Context,
+    search: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if search:
+        kwargs: dict[str, Any] = {"query": search}
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.team_externalTeams_search(**kwargs))
+        return
+    _print_json(
+        client.team_externalTeams_list(count=count, page=page, cursor=cursor)
+    )
+
+
+@query_cmd.command("profile")
+@click.argument("user")
+@click.pass_context
+def query_profile(ctx: click.Context, user: str) -> None:
+    from ssd.dumpapi import DumpClient
+
+    _print_json(DumpClient(ctx.obj["output"]).users_profile_get(user=user))
+
+
+@query_cmd.command("pins")
+@click.argument("channel", required=False)
+@click.argument("ts", required=False)
+@click.option("--search", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_pins(
+    ctx: click.Context,
+    channel: str | None,
+    ts: str | None,
+    search: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if channel and ts:
+        _print_json(client.pins_info(channel=channel, ts=ts))
+        return
+    if search:
+        kwargs: dict[str, Any] = {"query": search, "channel": channel}
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.pins_search(**kwargs))
+        return
+    _print_json(
+        client.pins_list(channel=channel, count=count, page=page, cursor=cursor)
+    )
+
+
+@query_cmd.command("scheduled")
+@click.argument("scheduled_id", required=False)
+@click.option("--search", default=None)
+@click.option("--channel", default=None)
+@click.option("--oldest", default=None)
+@click.option("--latest", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_scheduled(
+    ctx: click.Context,
+    scheduled_id: str | None,
+    search: str | None,
+    channel: str | None,
+    oldest: str | None,
+    latest: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if scheduled_id:
+        _print_json(client.chat_scheduledMessages_info(id=scheduled_id))
+        return
+    if search:
+        kwargs: dict[str, Any] = {"query": search, "channel": channel}
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.chat_scheduledMessages_search(**kwargs))
+        return
+    _print_json(
+        client.chat_scheduledMessages_list(
+            channel=channel, oldest=oldest, latest=latest, count=count, page=page, cursor=cursor
+        )
+    )
+
+
+@query_cmd.command("threads")
+@click.argument("channel", required=False)
+@click.argument("ts", required=False)
+@click.option("--search", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_threads(
+    ctx: click.Context,
+    channel: str | None,
+    ts: str | None,
+    search: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if channel and ts:
+        _print_json(client.threads_info(channel=channel, ts=ts))
+        return
+    if search:
+        kwargs: dict[str, Any] = {"query": search, "channel": channel}
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.threads_search(**kwargs))
+        return
+    _print_json(
+        client.threads_list(channel=channel, count=count, page=page, cursor=cursor)
+    )
+
+
+@query_cmd.command("replies")
+@click.argument("channel")
+@click.argument("ts")
+@click.option("--search", default=None)
+@click.option("--oldest", default=None)
+@click.option("--latest", default=None)
+@click.option("--inclusive", is_flag=True)
+@click.option("--limit", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_replies(
+    ctx: click.Context,
+    channel: str,
+    ts: str,
+    search: str | None,
+    oldest: str | None,
+    latest: str | None,
+    inclusive: bool,
+    limit: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    kwargs: dict[str, Any] = {
+        "channel": channel,
+        "ts": ts,
+        "oldest": oldest,
+        "latest": latest,
+        "inclusive": inclusive,
+    }
+    if limit is not None:
+        kwargs["limit"] = limit
+    if cursor is not None:
+        kwargs["cursor"] = cursor
+    if search:
+        _print_json(client.conversations_replies_search(query=search, **kwargs))
+        return
+    _print_json(client.conversations_replies(**kwargs))
+
+
+@query_cmd.command("stars")
+@click.argument("channel", required=False)
+@click.argument("ts", required=False)
+@click.option("--channel", "channel_opt", default=None)
+@click.option("--search", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_stars(
+    ctx: click.Context,
+    channel: str | None,
+    ts: str | None,
+    channel_opt: str | None,
+    search: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if channel and ts:
+        _print_json(client.stars_info(channel=channel, ts=ts))
+        return
+    if search:
+        kwargs: dict[str, Any] = {"query": search, "channel": channel_opt or channel}
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.stars_search(**kwargs))
+        return
+    _print_json(
+        client.stars_list(
+            channel=channel_opt or channel, count=count, page=page, cursor=cursor
+        )
+    )
+
+
+@query_cmd.command("reminders")
+@click.argument("reminder", required=False)
+@click.option("--search", default=None)
+@click.option("--complete/--no-complete", default=True)
+@click.option("--user", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_reminders(
+    ctx: click.Context,
+    reminder: str | None,
+    search: str | None,
+    complete: bool,
+    user: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if reminder:
+        _print_json(client.reminders_info(reminder=reminder))
+        return
+    if search:
+        kwargs: dict[str, Any] = {
+            "query": search,
+            "include_complete": complete,
+            "user": user,
+        }
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.reminders_search(**kwargs))
+        return
+    _print_json(
+        client.reminders_list(
+            include_complete=complete, user=user, count=count, page=page, cursor=cursor
+        )
+    )
+
+
+@query_cmd.command("usergroups")
+@click.argument("usergroup", required=False)
+@click.option("--search", default=None)
+@click.option("--include-disabled", is_flag=True)
+@click.option("--include-count", is_flag=True)
+@click.option("--no-users", is_flag=True)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_usergroups(
+    ctx: click.Context,
+    usergroup: str | None,
+    search: str | None,
+    include_disabled: bool,
+    include_count: bool,
+    no_users: bool,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if usergroup:
+        _print_json(client.usergroups_info(usergroup=usergroup))
+        return
+    if search:
+        kwargs: dict[str, Any] = {"query": search, "include_disabled": include_disabled}
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.usergroups_search(**kwargs))
+        return
+    _print_json(
+        client.usergroups_list(
+            include_disabled=include_disabled,
+            include_count=include_count,
+            include_users=not no_users,
+            count=count,
+            page=page,
+            cursor=cursor,
+        )
+    )
+
+
+@query_cmd.command("presence")
+@click.argument("user", required=False, default=None)
+@click.option("--search", default=None)
+@click.option("--all", "all_users", is_flag=True)
+@click.pass_context
+def query_presence(
+    ctx: click.Context, user: str | None, search: str | None, all_users: bool
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if search:
+        _print_json(client.presence_search(query=search))
+        return
+    if all_users:
+        _print_json({"ok": True, "users": list(client.iter_presence())})
+        return
+    _print_json(client.users_getPresence(user=user))
+
+
+@query_cmd.command("access-logs")
+@click.option("--search", default=None)
+@click.option("--user", default=None)
+@click.option("--after", default=None)
+@click.option("--before", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_access_logs(
+    ctx: click.Context,
+    search: str | None,
+    user: str | None,
+    after: str | None,
+    before: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if search:
+        kwargs: dict[str, Any] = {
+            "query": search,
+            "user": user,
+            "after": after,
+            "before": before,
+        }
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.team_accessLogs_search(**kwargs))
+        return
+    _print_json(
+        client.team_accessLogs(
+            user=user, after=after, before=before, count=count, page=page, cursor=cursor
+        )
+    )
+
+
+@query_cmd.command("team")
+@click.pass_context
+def query_team(ctx: click.Context) -> None:
+    from ssd.dumpapi import DumpClient
+
+    _print_json(DumpClient(ctx.obj["output"]).team_info())
+
+
+@query_cmd.command("bots")
+@click.argument("bot", required=False)
+@click.option("--search", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_bots(
+    ctx: click.Context,
+    bot: str | None,
+    search: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if search:
+        kwargs: dict[str, Any] = {"query": search}
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.bots_search(**kwargs))
+        return
+    if bot:
+        _print_json(client.bots_info(bot=bot))
+        return
+    _print_json(client.bots_list(count=count, page=page, cursor=cursor))
+
+
+@query_cmd.command("members")
+@click.argument("channel")
+@click.option("--search", default=None)
+@click.option("--limit", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_members(
+    ctx: click.Context,
+    channel: str,
+    search: str | None,
+    limit: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    kwargs: dict[str, Any] = {"channel": channel}
+    if limit is not None:
+        kwargs["limit"] = limit
+    if cursor is not None:
+        kwargs["cursor"] = cursor
+    if search:
+        _print_json(client.conversations_members_search(query=search, **kwargs))
+        return
+    _print_json(client.conversations_members(**kwargs))
+
+
+@query_cmd.command("convos")
+@click.argument("user")
+@click.option("--search", default=None)
+@click.option("--types", default=None)
+@click.option("--exclude-archived", is_flag=True)
+@click.option("--limit", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_convos(
+    ctx: click.Context,
+    user: str,
+    search: str | None,
+    types: str | None,
+    exclude_archived: bool,
+    limit: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    kwargs: dict[str, Any] = {
+        "user": user,
+        "types": types,
+        "exclude_archived": exclude_archived,
+    }
+    if limit is not None:
+        kwargs["limit"] = limit
+    if cursor is not None:
+        kwargs["cursor"] = cursor
+    if search:
+        _print_json(client.users_conversations_search(query=search, **kwargs))
+        return
+    _print_json(client.users_conversations(**kwargs))
+
+
+@query_cmd.command("reactions")
+@click.argument("channel", required=False)
+@click.argument("ts", required=False)
+@click.option("--search", default=None)
+@click.option("--user", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_reactions(
+    ctx: click.Context,
+    channel: str | None,
+    ts: str | None,
+    search: str | None,
+    user: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if channel and ts:
+        _print_json(client.reactions_get(channel=channel, timestamp=ts))
+        return
+    if search:
+        kwargs: dict[str, Any] = {"query": search, "channel": channel, "user": user}
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.reactions_search(**kwargs))
+        return
+    _print_json(
+        client.reactions_list(channel=channel, user=user, count=count, page=page, cursor=cursor)
+    )
+
+
+@query_cmd.command("dnd")
+@click.argument("user", required=False, default=None)
+@click.option("--search", default=None)
+@click.option("--users", default=None, help="Comma-separated user ids for dnd.teamInfo")
+@click.pass_context
+def query_dnd(
+    ctx: click.Context, user: str | None, search: str | None, users: str | None
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if search:
+        _print_json(client.dnd_search(query=search, users=users or user))
+        return
+    if users is not None:
+        _print_json(client.dnd_teamInfo(users=users or None))
+        return
+    _print_json(client.dnd_info(user=user))
+
+
+@query_cmd.command("comments")
+@click.argument("file_id")
+@click.option("--search", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_comments(
+    ctx: click.Context,
+    file_id: str,
+    search: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if search:
+        kwargs: dict[str, Any] = {"file": file_id, "query": search}
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.files_comments_search(**kwargs))
+        return
+    _print_json(
+        client.files_comments(file=file_id, count=count, page=page, cursor=cursor)
+    )
+
+
+@query_cmd.command("email")
+@click.argument("addr")
+@click.pass_context
+def query_email(ctx: click.Context, addr: str) -> None:
+    from ssd.dumpapi import DumpClient
+
+    _print_json(DumpClient(ctx.obj["output"]).users_lookupByEmail(email=addr))
+
+
+@query_cmd.command("files-info")
+@click.argument("file_id")
+@click.pass_context
+def query_files_info(ctx: click.Context, file_id: str) -> None:
+    from ssd.dumpapi import DumpClient
+
+    _print_json(DumpClient(ctx.obj["output"]).files_info(file=file_id))
+
+
+@query_cmd.command("usergroup-users")
+@click.argument("handle")
+@click.option("--search", default=None)
+@click.option("--limit", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_usergroup_users(
+    ctx: click.Context,
+    handle: str,
+    search: str | None,
+    limit: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    kwargs: dict[str, Any] = {"usergroup": handle}
+    if limit is not None:
+        kwargs["limit"] = limit
+    if cursor is not None:
+        kwargs["cursor"] = cursor
+    if search:
+        _print_json(client.usergroups_users_search(query=search, **kwargs))
+        return
+    _print_json(client.usergroups_users(**kwargs))
+
+
+@query_cmd.command("calls")
+@click.argument("call_id", required=False)
+@click.option("--search", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_calls(
+    ctx: click.Context,
+    call_id: str | None,
+    search: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if search:
+        kwargs: dict[str, Any] = {"query": search}
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.calls_search(**kwargs))
+        return
+    if call_id:
+        _print_json(client.calls_info(id=call_id))
+        return
+    _print_json(client.calls_list(count=count, page=page, cursor=cursor))
+
+
+@query_cmd.command("participants")
+@click.argument("call_id")
+@click.option("--search", default=None)
+@click.pass_context
+def query_participants(ctx: click.Context, call_id: str, search: str | None) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if search:
+        _print_json(client.calls_participants_search(id=call_id, query=search))
+        return
+    _print_json(client.calls_participants(id=call_id))
+
+
+@query_cmd.command("billable")
+@click.option("--search", default=None)
+@click.option("--user", default=None)
+@click.pass_context
+def query_billable(ctx: click.Context, search: str | None, user: str | None) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if search:
+        _print_json(client.team_billableInfo_search(query=search, user=user))
+        return
+    _print_json(client.team_billableInfo(user=user))
+
+
+@query_cmd.command("integration-logs")
+@click.option("--search", default=None)
+@click.option("--user", default=None)
+@click.option("--change-type", default=None)
+@click.option("--app-id", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_integration_logs(
+    ctx: click.Context,
+    search: str | None,
+    user: str | None,
+    change_type: str | None,
+    app_id: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if search:
+        kwargs: dict[str, Any] = {
+            "query": search,
+            "user": user,
+            "change_type": change_type,
+            "app_id": app_id,
+        }
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.team_integrationLogs_search(**kwargs))
+        return
+    _print_json(
+        client.team_integrationLogs(
+            user=user,
+            change_type=change_type,
+            app_id=app_id,
+            count=count,
+            page=page,
+            cursor=cursor,
+        )
+    )
+
+
+@query_cmd.command("bookmarks")
+@click.argument("channel", required=False)
+@click.option("--search", default=None)
+@click.option("--count", default=None, type=int)
+@click.option("--page", default=None, type=int)
+@click.option("--cursor", default=None)
+@click.pass_context
+def query_bookmarks(
+    ctx: click.Context,
+    channel: str | None,
+    search: str | None,
+    count: int | None,
+    page: int | None,
+    cursor: str | None,
+) -> None:
+    from ssd.dumpapi import DumpClient
+
+    client = DumpClient(ctx.obj["output"])
+    if channel and channel.startswith("Bk"):
+        _print_json(client.bookmarks_info(bookmark=channel))
+        return
+    if search:
+        kwargs: dict[str, Any] = {"query": search, "channel": channel}
+        if count is not None:
+            kwargs["count"] = count
+        if page is not None:
+            kwargs["page"] = page
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        _print_json(client.bookmarks_search(**kwargs))
+        return
+    _print_json(
+        client.bookmarks_list(channel=channel, count=count, page=page, cursor=cursor)
+    )
+
+
+@query_cmd.command("permalink")
+@click.argument("channel")
+@click.argument("ts")
+@click.pass_context
+def query_permalink(ctx: click.Context, channel: str, ts: str) -> None:
+    from ssd.dumpapi import DumpClient
+
+    _print_json(
+        DumpClient(ctx.obj["output"]).chat_getPermalink(channel=channel, message_ts=ts)
+    )
+
+
+@query_cmd.command("api")
+@click.argument("method")
+@click.argument("args", nargs=-1)
+@click.pass_context
+def query_api(ctx: click.Context, method: str, args: tuple[str, ...]) -> None:
+    from ssd.dumpapi import DumpClient
+
+    payload: dict[str, Any] = {}
+    for item in args:
+        key, sep, val = item.partition("=")
+        if not sep:
+            raise click.UsageError(f"expected key=value, got {item}")
+        payload[key] = val
+    _print_json(DumpClient(ctx.obj["output"]).api_call(method, params=payload))
+
+
+@query_cmd.command("migration")
+@click.argument("users")
+@click.pass_context
+def query_migration(ctx: click.Context, users: str) -> None:
+    from ssd.dumpapi import DumpClient
+
+    _print_json(DumpClient(ctx.obj["output"]).migration_exchange(users=users))
