@@ -151,7 +151,8 @@ def run_sync(
         write_cursor(thread_dir, max(m["ts"] for m in enriched))
         write_users(thread_dir, api.get_user_profiles())
         _write_sidecars(api, out_dir, channel_id, refresh_workspace=False)
-        click.echo(f"  thread {parsed.thread_ts}: {len(enriched)} new replies")
+        n_replies = sum(1 for m in enriched if m.get("ts") != parsed.thread_ts)
+        click.echo(f"  thread {parsed.thread_ts}: {n_replies} new replies")
         return
 
     if parsed.channel_id:

@@ -183,6 +183,38 @@ def test_build_graph_thread_dump_parent_reply_edge(tmp_path):
     assert ("bob", "alice") in links
 
 
+def test_build_graph_skips_thread_dump_when_parent_in_messages(tmp_path):
+    _write_messages(
+        tmp_path,
+        [
+            {
+                "ts": "1.0",
+                "user_name": "alice",
+                "text": "root",
+                "thread": [
+                    {"ts": "1.1", "user_name": "bob", "text": "reply", "files": []},
+                ],
+                "files": [],
+            }
+        ],
+    )
+    thread_dir = tmp_path / "thread_1_0"
+    thread_dir.mkdir()
+    (thread_dir / "thread.json").write_text(
+        json.dumps(
+            [
+                {"ts": "1.0", "user_name": "alice", "text": "root", "files": []},
+                {"ts": "1.1", "user_name": "bob", "text": "reply", "files": []},
+            ]
+        )
+    )
+    g = build_graph([tmp_path])
+    alice = next(n for n in g["nodes"] if n["id"] == "alice")
+    bob = next(n for n in g["nodes"] if n["id"] == "bob")
+    assert alice["messages"] == 1
+    assert bob["replies"] == 1
+
+
 def test_render_html_escapes_script_injection(tmp_path):
     injection = "</script><script>alert(1)</script>"
     g = {

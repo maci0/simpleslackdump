@@ -241,6 +241,7 @@ class SlackAPI:
         self._external_teams: list[dict[str, Any]] | None = None
         self._auth_teams: list[dict[str, Any]] | None = None
         self._remote_files: list[dict[str, Any]] | None = None
+        self._file_info: dict[str, dict[str, Any]] = {}
 
     def get_workspace(self) -> str:
         resp = self.auth_payload()
@@ -373,7 +374,8 @@ class SlackAPI:
         Default ``oldest`` is now, so history is not replayed. Default interval
         is at least 5s (or ``delay`` if larger) to stay under history rate limits.
         Inclusive ``oldest`` hits are skipped. Channel watch does not poll old
-        threads for new replies (one API call per interval).
+        threads for new replies, even when ``reply_count`` is set (one API call
+        per interval).
         """
         channel_id, _name = self.resolve_channel(channel)
         cursor = oldest if oldest is not None else str(time.time())
@@ -395,7 +397,9 @@ class SlackAPI:
                 if thread_ts:
                     yield from (self.enrich_reply(r, channel_id=channel_id) for r in new)
                 else:
-                    yield from self.enrich(channel_id, new)
+                    yield from (
+                        {**self.enrich_reply(m, channel_id=channel_id), "thread": []} for m in new
+                    )
                 cursor = str(new[-1]["ts"])
             time.sleep(wait)
 
@@ -664,11 +668,15 @@ class SlackAPI:
         return self._files_list
 
     def get_file_info(self, file_id: str) -> dict[str, Any]:
+        cached = self._file_info.get(file_id)
+        if cached is not None:
+            return cached
         raw = dict(self.client.files_info(file=file_id))
         file_obj = dict(raw.get("file") or {})
         comments = raw.get("comments")
         if comments is not None:
             file_obj["comments"] = comments
+        self._file_info[file_id] = file_obj
         return file_obj
 
     def get_remote_files(self) -> list[dict[str, Any]]:

@@ -37,6 +37,23 @@ def test_sync_keeps_existing_workspace_sidecar(tmp_path, mock_api):
     mock_api.get_stars.assert_not_called()
 
 
+def test_sync_derives_canvases_from_files_json(tmp_path, mock_api):
+    ws = tmp_path / "testteam"
+    out_dir = channel_dir(str(tmp_path), "testteam", "general", "C123")
+    out_dir.mkdir(parents=True)
+    write_cursor(out_dir, "1705320720.000000")
+    (ws / "files.json").write_text(
+        '[{"id":"Fc","filetype":"canvas","name":"notes"},{"id":"F1","filetype":"png"}]',
+        encoding="utf-8",
+    )
+    mock_api.get_messages.return_value = []
+    mock_api.get_files.return_value = []
+    run_sync(mock_api, "testteam", "C123", str(tmp_path), since=None)
+    mock_api.get_files.assert_not_called()
+    canvases = json.loads((ws / "canvases.json").read_text())
+    assert [c["id"] for c in canvases] == ["Fc"]
+
+
 def test_sync_reads_cursor_and_passes_oldest(tmp_path, mock_api):
     out_dir = channel_dir(str(tmp_path), "testteam", "general", "C123")
     out_dir.mkdir(parents=True)

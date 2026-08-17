@@ -372,6 +372,21 @@ def test_dump_presence_merges_second_channel(tmp_path, mock_api):
     assert "U3" in presence
 
 
+def test_dump_presence_skips_failed_member(tmp_path, mock_api):
+    mock_api.get_channel_members.return_value = ["U1", "Ubad"]
+
+    def presence(uid: str) -> dict:
+        if uid == "Ubad":
+            raise RuntimeError("users_not_found")
+        return {"presence": "away", "user": uid}
+
+    mock_api.get_presence.side_effect = presence
+    run_dump(mock_api, "testteam", "C123", str(tmp_path))
+    presence_data = json.loads((tmp_path / "testteam" / "presence.json").read_text())
+    assert "U1" in presence_data
+    assert "Ubad" not in presence_data
+
+
 def test_dump_file_comments(tmp_path, mock_api):
     fobj = {
         "id": "F1",
@@ -402,6 +417,44 @@ def test_dump_file_comments(tmp_path, mock_api):
     ch = tmp_path / "testteam" / "general_C123"
     ch_files = json.loads((ch / "files.json").read_text())
     assert ch_files[0]["comments"][0]["id"] == "Fc1"
+
+
+def test_write_channel_stats_reuses_file_comments(tmp_path):
+    from ssd.dump import write_channel_stats
+
+    out_dir = tmp_path / "acme" / "general_C123"
+    out_dir.mkdir(parents=True)
+    (out_dir / "files.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "F1",
+                    "name": "a.png",
+                    "comments_count": 1,
+                    "comments": [{"id": "Fc1", "comment": "nice"}],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    api = MagicMock()
+    write_channel_stats(
+        out_dir,
+        [
+            {
+                "ts": "1.0",
+                "user": "U1",
+                "text": "hi",
+                "reactions": [],
+                "thread": [],
+                "files": [{"id": "F1", "name": "a.png", "comments_count": 1}],
+            }
+        ],
+        api=api,
+    )
+    api.get_file_info.assert_not_called()
+    files = json.loads((out_dir / "files.json").read_text())
+    assert files[0]["comments"][0]["id"] == "Fc1"
 
 
 def test_dump_canvases(tmp_path, mock_api):

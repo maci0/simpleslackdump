@@ -34,8 +34,9 @@ def build_graph(dirs: list[Path]) -> dict[str, Any]:
 
     Reads each messages.json once, buffering (sender, text, text_raw) for the
     mention scan which runs after all users are known. Standalone thread dumps
-    under thread_*/thread.json are also collected in the same pass. The parent
-    in a thread dump (ts matching the folder) counts as a message, not a reply.
+    under thread_*/thread.json are also collected in the same pass, unless the
+    parent ts is already in that channel's messages.json. The parent in a
+    thread dump (ts matching the folder) counts as a message, not a reply.
     """
     edges: dict[tuple[str, str], int] = defaultdict(int)
     user_messages: dict[str, int] = defaultdict(int)
@@ -48,10 +49,14 @@ def build_graph(dirs: list[Path]) -> dict[str, Any]:
         if not d.is_dir():
             continue
         msg_file = d / "messages.json"
+        seen_ts: set[str] = set()
         if msg_file.exists():
             channels.append(d.name)
             messages = json.loads(msg_file.read_text())
             for msg in messages:
+                ts = str(msg.get("ts") or "")
+                if ts:
+                    seen_ts.add(ts)
                 sender = _note_user(id_to_name, msg)
                 if sender != "unknown":
                     user_messages[sender] += 1
@@ -71,11 +76,13 @@ def build_graph(dirs: list[Path]) -> dict[str, Any]:
         for thread_dir in d.iterdir():
             if not thread_dir.is_dir() or not thread_dir.name.startswith("thread_"):
                 continue
+            parent_ts = _ts_from_thread_dir(thread_dir.name)
+            if parent_ts and parent_ts in seen_ts:
+                continue
             tf = thread_dir / "thread.json"
             if not tf.exists():
                 continue
             rows = json.loads(tf.read_text())
-            parent_ts = _ts_from_thread_dir(thread_dir.name)
             parent_name = None
             if parent_ts:
                 for row in rows:

@@ -80,20 +80,21 @@ def _write_sidecars(
     canvases_path = ws / "canvases.json"
     need_files = refresh_workspace or not files_path.exists()
     need_canvas = refresh_workspace or not canvases_path.exists()
-    if need_files or need_canvas:
+    if need_files:
         try:
             listed = _attach_comments(api, list(api.get_files()))
-            if need_files:
-                write_json(ws, "files.json", listed)
+            write_json(ws, "files.json", listed)
             if need_canvas:
-                canvases = [
-                    f
-                    for f in listed
-                    if isinstance(f, dict) and str(f.get("filetype") or "").lower() == "canvas"
-                ]
-                write_json(ws, "canvases.json", canvases)
+                write_json(ws, "canvases.json", _canvas_rows(listed))
         except Exception as exc:
             click.echo(f"  files list skipped: {exc}", err=True)
+    elif need_canvas:
+        try:
+            raw = json.loads(files_path.read_text()) if files_path.is_file() else []
+            listed = raw if isinstance(raw, list) else []
+            write_json(ws, "canvases.json", _canvas_rows(listed))
+        except Exception as exc:
+            click.echo(f"  canvases skipped: {exc}", err=True)
     write_ws("remote_files.json", api.get_remote_files, "remote files")
     try:
         _merge_presence(api, ws, channel_id)
@@ -134,6 +135,7 @@ def write_channel_stats(
     write_json(out_dir, "reactions.json", _reaction_rows(out_dir, messages))
     files = _file_rows(messages)
     if api is not None:
+        _copy_file_comments(out_dir / "files.json", files)
         _attach_comments(api, files)
     write_json(out_dir, "files.json", files)
     write_json(out_dir, "calls.json", _call_rows(messages))
@@ -193,6 +195,39 @@ def _walk_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if isinstance(msg, dict):
             walk(msg)
     return out
+
+
+def _canvas_rows(listed: list[Any]) -> list[dict[str, Any]]:
+    return [
+        f
+        for f in listed
+        if isinstance(f, dict) and str(f.get("filetype") or "").lower() == "canvas"
+    ]
+
+
+def _copy_file_comments(path: Path, files: list[dict[str, Any]]) -> None:
+    if not path.is_file():
+        return
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(raw, list):
+        return
+    by_id = {
+        str(f.get("id")): f
+        for f in raw
+        if isinstance(f, dict) and f.get("id") and f.get("comments")
+    }
+    for fobj in files:
+        if not isinstance(fobj, dict) or fobj.get("comments"):
+            continue
+        prev = by_id.get(str(fobj.get("id") or ""))
+        if not prev:
+            continue
+        fobj["comments"] = prev["comments"]
+        if prev.get("comments_count") is not None:
+            fobj["comments_count"] = prev["comments_count"]
 
 
 def _file_rows(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -286,7 +321,10 @@ def _merge_presence(api: SlackAPI, ws_dir: Path, channel_id: str) -> None:
             first = False
         elif delay:
             time.sleep(delay)
-        existing[uid] = api.get_presence(uid)
+        try:
+            existing[uid] = api.get_presence(uid)
+        except Exception:
+            continue
     write_json(ws_dir, "presence.json", existing)
 
 
@@ -426,9 +464,9 @@ def run_dump(
         write_users(thread_dir, api.get_user_profiles())
         _write_sidecars(api, out_dir, channel_id, refresh_workspace=refresh_workspace)
         elapsed = time.monotonic() - t0
+        n_replies = sum(1 for m in enriched if m.get("ts") != parsed.thread_ts)
         click.echo(
-            f"  thread {parsed.thread_ts}: {len(enriched)} replies"
-            f" in {elapsed:.1f}s -> {thread_dir}"
+            f"  thread {parsed.thread_ts}: {n_replies} replies in {elapsed:.1f}s -> {thread_dir}"
         )
         return
 

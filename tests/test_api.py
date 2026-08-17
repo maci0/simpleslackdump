@@ -980,6 +980,8 @@ def test_get_file_info_attaches_comments(mock_client):
     assert info["id"] == "F1"
     assert info["comments"][0]["comment"] == "nice"
     mock_client.files_info.assert_called_once_with(file="F1")
+    api.get_file_info("F1")
+    mock_client.files_info.assert_called_once_with(file="F1")
 
 
 def test_get_remote_files_paginates(mock_client):
@@ -1179,3 +1181,18 @@ def test_watch_messages_thread_polls_replies(mock_client, monkeypatch):
     assert [m["text"] for m in got] == ["reply"]
     mock_client.conversations_history.assert_not_called()
     assert mock_client.conversations_replies.call_args.kwargs["ts"] == "1.0"
+
+
+def test_watch_messages_channel_does_not_fetch_replies(mock_client, monkeypatch):
+    monkeypatch.setattr("ssd.api.time.sleep", lambda _s: None)
+    _watch_stubs(mock_client)
+    mock_client.conversations_history.return_value = _hist(
+        [{"ts": "1.0", "user": "U1", "text": "hi", "reply_count": 2}]
+    )
+    mock_client.conversations_replies.return_value = _hist(
+        [{"ts": "1.0", "user": "U1", "text": "hi"}, {"ts": "1.1", "user": "U1", "text": "reply"}]
+    )
+    api = SlackAPI("xoxd-fake", delay=0)
+    got = list(islice(api.watch_messages("C123", oldest="0", interval=0), 1))
+    assert [m["text"] for m in got] == ["hi"]
+    mock_client.conversations_replies.assert_not_called()
