@@ -7,8 +7,112 @@ def test_help(invoke):
     assert "token" in result.output
     assert "dump" in result.output
     assert "sync" in result.output
+    assert "watch" in result.output
     assert "add" in result.output
     assert "update" in result.output
+
+
+def test_watch_prints_jsonl(invoke, tmp_path, mocker):
+    api = mocker.MagicMock()
+    api.watch_messages.return_value = iter(
+        [
+            {"ts": "1.0", "user_name": "alice", "text": "hi"},
+            {"ts": "2.0", "user_name": "bob", "text": "yo"},
+        ]
+    )
+    mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
+    result = invoke("--output", str(tmp_path), "watch", "C123")
+    assert result.exit_code == 0
+    lines = [ln for ln in result.output.splitlines() if ln]
+    assert json.loads(lines[0])["text"] == "hi"
+    assert json.loads(lines[1])["text"] == "yo"
+    api.watch_messages.assert_called_once()
+    kwargs = api.watch_messages.call_args.kwargs
+    assert api.watch_messages.call_args.args[0] == "C123"
+    assert kwargs.get("oldest") is None
+
+
+def test_watch_thread_url_passes_thread_ts(invoke, tmp_path, mocker):
+    api = mocker.MagicMock()
+    api.watch_messages.return_value = iter([])
+    mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
+    result = invoke(
+        "--output",
+        str(tmp_path),
+        "watch",
+        "https://acme.slack.com/archives/C123/p1705320720000000",
+    )
+    assert result.exit_code == 0
+    assert api.watch_messages.call_args.args[0] == "C123"
+    assert api.watch_messages.call_args.kwargs["thread_ts"] == "1705320720.000000"
+
+
+def test_watch_tty_line(invoke, tmp_path, mocker, monkeypatch):
+    api = mocker.MagicMock()
+    api.watch_messages.return_value = iter(
+        [{"ts": "1.0", "user_name": "alice", "text": "hello dump"}]
+    )
+    mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "watch", "C123")
+    assert result.exit_code == 0
+    assert "alice" in result.output
+    assert "hello dump" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_watch_json_flag_on_tty(invoke, tmp_path, mocker, monkeypatch):
+    api = mocker.MagicMock()
+    api.watch_messages.return_value = iter(
+        [{"ts": "1.0", "user_name": "alice", "text": "hello dump"}]
+    )
+    mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "watch", "--json", "C123")
+    assert result.exit_code == 0
+    data = json.loads(result.output.splitlines()[0])
+    assert data["text"] == "hello dump"
+
+
+def test_watch_from_cursor(invoke, tmp_path, mocker):
+    api = mocker.MagicMock()
+    api.watch_messages.return_value = iter([])
+    api.resolve_channel.return_value = ("C123", "general")
+    mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
+    dump_dir = tmp_path / "acme" / "general_C123"
+    dump_dir.mkdir(parents=True)
+    (dump_dir / ".cursor").write_text("1705320720.000000", encoding="utf-8")
+    result = invoke("--output", str(tmp_path), "watch", "--from-cursor", "C123")
+    assert result.exit_code == 0
+    assert api.watch_messages.call_args.kwargs["oldest"] == "1705320720.000000"
+
+
+def test_watch_from_cursor_missing(invoke, tmp_path, mocker):
+    api = mocker.MagicMock()
+    api.watch_messages.return_value = iter([])
+    api.resolve_channel.return_value = ("C123", "general")
+    mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
+    result = invoke("--output", str(tmp_path), "watch", "--from-cursor", "C123")
+    assert result.exit_code != 0
+    assert ".cursor" in result.output
+    api.watch_messages.assert_not_called()
+
+
+def test_watch_from_cursor_rejects_oldest(invoke, tmp_path, mocker):
+    api = mocker.MagicMock()
+    mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
+    result = invoke("--output", str(tmp_path), "watch", "--from-cursor", "--oldest", "1", "C123")
+    assert result.exit_code != 0
+    api.watch_messages.assert_not_called()
+
+
+def test_watch_help(invoke):
+    result = invoke("watch", "--help")
+    assert result.exit_code == 0
+    assert "--interval" in result.output
+    assert "--oldest" in result.output
+    assert "--json" in result.output
+    assert "--from-cursor" in result.output
 
 
 def test_dump_help_has_all(invoke):
@@ -16,6 +120,84 @@ def test_dump_help_has_all(invoke):
     assert result.exit_code == 0
     assert "--all" in result.output
     assert "--dms" in result.output
+    assert "--yes" in result.output
+
+
+def test_dump_all_prints_progress(invoke, tmp_path, mocker):
+    api = mocker.MagicMock()
+    api.list_conversations.return_value = [{"id": "C1"}, {"id": "C2"}]
+    mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
+    run_dump = mocker.patch("ssd.dump.run_dump")
+    result = invoke("--output", str(tmp_path), "dump", "--all")
+    assert result.exit_code == 0
+    assert "1/2" in result.output
+    assert "2/2" in result.output
+    assert run_dump.call_args_list[0].kwargs["refresh_workspace"] is True
+    assert run_dump.call_args_list[1].kwargs["refresh_workspace"] is False
+
+
+def test_dump_all_confirm_abort(invoke, tmp_path, mocker):
+    api = mocker.MagicMock()
+    api.list_conversations.return_value = [{"id": "C1"}]
+    mocker.patch("ssd.cli._should_confirm", return_value=True)
+    mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
+    run_dump = mocker.patch("ssd.dump.run_dump")
+    result = invoke("--output", str(tmp_path), "dump", "--all", input="n\n")
+    assert result.exit_code != 0
+    run_dump.assert_not_called()
+
+
+def test_dump_all_yes_skips_confirm(invoke, tmp_path, mocker):
+    api = mocker.MagicMock()
+    api.list_conversations.return_value = [{"id": "C1"}]
+    mocker.patch("ssd.cli._should_confirm", return_value=True)
+    mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
+    run_dump = mocker.patch("ssd.dump.run_dump")
+    result = invoke("--output", str(tmp_path), "dump", "--all", "--yes")
+    assert result.exit_code == 0
+    run_dump.assert_called_once()
+
+
+def _graph_dump(tmp_path):
+    ch = tmp_path / "acme" / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text(
+        '[{"ts":"1.0","user_name":"alice","text":"hi","thread":[],"files":[]}]',
+        encoding="utf-8",
+    )
+    return ch
+
+
+def test_graph_does_not_open_browser_by_default(invoke, tmp_path, mocker):
+    _graph_dump(tmp_path)
+    opened = mocker.patch("ssd.cli.webbrowser.open")
+    result = invoke("--output", str(tmp_path), "graph", "--output", str(tmp_path / "g.html"))
+    assert result.exit_code == 0
+    opened.assert_not_called()
+    assert "—" not in result.output
+    assert "users" in result.output
+
+
+def test_graph_help_has_open(invoke):
+    result = invoke("graph", "--help")
+    assert result.exit_code == 0
+    assert "--open" in result.output
+    assert "--no-open" in result.output
+
+
+def test_graph_open_flag(invoke, tmp_path, mocker):
+    _graph_dump(tmp_path)
+    opened = mocker.patch("ssd.cli.webbrowser.open")
+    result = invoke(
+        "--output",
+        str(tmp_path),
+        "graph",
+        "--open",
+        "--output",
+        str(tmp_path / "g.html"),
+    )
+    assert result.exit_code == 0
+    opened.assert_called_once()
 
 
 def test_help_lists_query(invoke):
@@ -31,6 +213,13 @@ def test_query_help(invoke):
     assert "search" in result.output
     assert "from:/in:/has:/is:" in result.output
     assert "conversations.history" in result.output
+    assert "Messages:" in result.output
+    assert "People:" in result.output
+    assert "Channels:" in result.output
+    assert "Files:" in result.output
+    assert "Team:" in result.output
+    assert "Raw:" in result.output
+    assert "--json" in result.output
 
 
 def test_query_missing_dump_is_usage_error(invoke, tmp_path):
@@ -102,6 +291,54 @@ def test_query_search(invoke, tmp_path):
     assert data["messages"]["total"] >= 1
 
 
+def test_query_search_table_when_tty(invoke, tmp_path, monkeypatch):
+    ch = tmp_path / "acme" / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text(
+        '[{"ts":"1.0","user":"U1","user_name":"a","text":"hello dump",'
+        '"reactions":[],"files":[],"thread":[]}]',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "search", "hello")
+    assert result.exit_code == 0
+    assert "channel" in result.output.splitlines()[0].lower()
+    assert "hello dump" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_search_json_flag(invoke, tmp_path, monkeypatch):
+    ch = tmp_path / "acme" / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text(
+        '[{"ts":"1.0","user":"U1","user_name":"a","text":"hello dump",'
+        '"reactions":[],"files":[],"thread":[]}]',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "--json", "search", "hello")
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["messages"]["total"] >= 1
+
+
+def test_query_history_table_when_tty(invoke, tmp_path, monkeypatch):
+    ch = tmp_path / "acme" / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text(
+        '[{"ts":"1.0","user":"U1","user_name":"a","text":"line one\\nline two",'
+        '"reactions":[],"files":[],"thread":[]}]',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "history", "C123")
+    assert result.exit_code == 0
+    assert "channel" in result.output.splitlines()[0].lower()
+    assert "line one" in result.output
+    assert "\nline two" not in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
 def _query_dump(tmp_path):
     ch = tmp_path / "acme" / "general_C123"
     ch.mkdir(parents=True)
@@ -120,6 +357,424 @@ def test_query_users(invoke, tmp_path):
     data = json.loads(result.output)
     assert data["ok"] is True
     assert any(u["id"] == "U1" for u in data["members"])
+
+
+def test_query_users_table_when_tty(invoke, tmp_path, monkeypatch):
+    _query_dump(tmp_path)
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "users")
+    assert result.exit_code == 0
+    header = result.output.splitlines()[0].lower()
+    assert "id" in header
+    assert "name" in header
+    assert "U1" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_files_table_when_tty(invoke, tmp_path, monkeypatch):
+    _query_dump(tmp_path)
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "files")
+    assert result.exit_code == 0
+    header = result.output.splitlines()[0].lower()
+    assert "id" in header
+    assert "name" in header
+    assert "F1" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_channels_table_when_tty(invoke, tmp_path, monkeypatch):
+    _query_dump(tmp_path)
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "channels")
+    assert result.exit_code == 0
+    header = result.output.splitlines()[0].lower()
+    assert "id" in header
+    assert "name" in header
+    assert "C123" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_replies_table_when_tty(invoke, tmp_path, monkeypatch):
+    ch = tmp_path / "acme" / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text(
+        '[{"ts":"1.0","user":"U1","user_name":"a","text":"root",'
+        '"reactions":[],"files":[],"thread":[{"ts":"1.1","user":"U2",'
+        '"user_name":"b","text":"reply","reactions":[],"files":[]}]}]',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "replies", "C123", "1.0")
+    assert result.exit_code == 0
+    header = result.output.splitlines()[0].lower()
+    assert "channel" in header
+    assert "reply" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_members_table_when_tty(invoke, tmp_path, monkeypatch):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ch / "members.json").write_text('["U1","U2"]', encoding="utf-8")
+    (ws / "users.json").write_text(
+        '{"U1":{"id":"U1","handle":"alice"},"U2":{"id":"U2","handle":"bob"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "members", "C123")
+    assert result.exit_code == 0
+    header = result.output.splitlines()[0].lower()
+    assert "id" in header
+    assert "U1" in result.output
+    assert "alice" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_threads_table_when_tty(invoke, tmp_path, monkeypatch):
+    ch = tmp_path / "acme" / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ch / "threads.json").write_text(
+        '[{"channel":"C123","thread_ts":"1.0","reply_count":2,"latest_reply":"1.2"}]',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "threads", "C123")
+    assert result.exit_code == 0
+    header = result.output.splitlines()[0].lower()
+    assert "thread_ts" in header
+    assert "1.0" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_channels_search_table_when_tty(invoke, tmp_path, monkeypatch):
+    ws = tmp_path / "acme"
+    (ws / "general_C123").mkdir(parents=True)
+    (ws / "general_C123" / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "random_C999").mkdir(parents=True)
+    (ws / "random_C999" / "messages.json").write_text("[]", encoding="utf-8")
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "channels", "--search", "rand")
+    assert result.exit_code == 0
+    assert "C999" in result.output
+    assert "C123" not in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_users_search_table_when_tty(invoke, tmp_path, monkeypatch):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "users.json").write_text(
+        '{"U1":{"id":"U1","handle":"alice"},"U2":{"id":"U2","handle":"bob"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "users", "--search", "alice")
+    assert result.exit_code == 0
+    assert "U1" in result.output
+    assert "alice" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_files_search_table_when_tty(invoke, tmp_path, monkeypatch):
+    _query_dump(tmp_path)
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "files", "--search", "a.txt")
+    assert result.exit_code == 0
+    assert "F1" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_pins_table_when_tty(invoke, tmp_path, monkeypatch):
+    ch = tmp_path / "acme" / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ch / "pins.json").write_text(
+        '[{"type":"message","channel":"C123","message":{"ts":"9.0","text":"pin"}}]',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "pins", "C123")
+    assert result.exit_code == 0
+    header = result.output.splitlines()[0].lower()
+    assert "channel" in header
+    assert "pin" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_stars_table_when_tty(invoke, tmp_path, monkeypatch):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "stars.json").write_text('[{"type":"message","channel":"C123"}]', encoding="utf-8")
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "stars")
+    assert result.exit_code == 0
+    header = result.output.splitlines()[0].lower()
+    assert "channel" in header
+    assert "C123" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_emoji_table_when_tty(invoke, tmp_path, monkeypatch):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "emoji.json").write_text('{"shipit":"https://e.test/s.png"}', encoding="utf-8")
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "emoji")
+    assert result.exit_code == 0
+    header = result.output.splitlines()[0].lower()
+    assert "name" in header
+    assert "shipit" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_bookmarks_table_when_tty(invoke, tmp_path, monkeypatch):
+    ch = tmp_path / "acme" / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ch / "bookmarks.json").write_text('[{"id":"Bk1","title":"docs"}]', encoding="utf-8")
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "bookmarks", "C123")
+    assert result.exit_code == 0
+    header = result.output.splitlines()[0].lower()
+    assert "id" in header
+    assert "Bk1" in result.output
+    assert "docs" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_usergroups_table_when_tty(invoke, tmp_path, monkeypatch):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "usergroups.json").write_text(
+        '[{"id":"S1","handle":"eng","name":"Engineering"}]', encoding="utf-8"
+    )
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "usergroups")
+    assert result.exit_code == 0
+    header = result.output.splitlines()[0].lower()
+    assert "handle" in header
+    assert "eng" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_bots_table_when_tty(invoke, tmp_path, monkeypatch):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "bots.json").write_text('{"B1":{"id":"B1","name":"deploybot"}}', encoding="utf-8")
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "bots")
+    assert result.exit_code == 0
+    header = result.output.splitlines()[0].lower()
+    assert "id" in header
+    assert "B1" in result.output
+    assert "deploybot" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_remote_files_table_when_tty(invoke, tmp_path, monkeypatch):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "files.json").write_text(
+        '[{"id":"Fext","name":"drive.doc","is_external":true}]', encoding="utf-8"
+    )
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "remote-files")
+    assert result.exit_code == 0
+    header = result.output.splitlines()[0].lower()
+    assert "id" in header
+    assert "Fext" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_convos_table_when_tty(invoke, tmp_path, monkeypatch):
+    _query_dump(tmp_path)
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "convos", "U1")
+    assert result.exit_code == 0
+    header = result.output.splitlines()[0].lower()
+    assert "id" in header
+    assert "C123" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_reactions_table_when_tty(invoke, tmp_path, monkeypatch):
+    ch = tmp_path / "acme" / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ch / "reactions.json").write_text(
+        '[{"type":"message","channel":"C123","reaction":"wave","user":"U2",'
+        '"message":{"ts":"1.0","text":"hi"}}]',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "reactions")
+    assert result.exit_code == 0
+    header = result.output.splitlines()[0].lower()
+    assert "reaction" in header
+    assert "wave" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_scheduled_table_when_tty(invoke, tmp_path, monkeypatch):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "scheduled_messages.json").write_text(
+        '[{"id":"Q1","channel_id":"C123","text":"later"}]', encoding="utf-8"
+    )
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "scheduled")
+    assert result.exit_code == 0
+    assert "Q1" in result.output
+    assert "later" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_reminders_table_when_tty(invoke, tmp_path, monkeypatch):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "reminders.json").write_text('[{"id":"Rm1","text":"ping"}]', encoding="utf-8")
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "reminders")
+    assert result.exit_code == 0
+    assert "Rm1" in result.output
+    assert "ping" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_comments_table_when_tty(invoke, tmp_path, monkeypatch):
+    ch = tmp_path / "acme" / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text(
+        '[{"ts":"1.0","user":"U1","user_name":"a","text":"f",'
+        '"reactions":[],"files":[{"id":"F1","name":"a.txt",'
+        '"comments":[{"id":"Fc1","comment":"nice","user":"U2"}]}],"thread":[]}]',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "comments", "F1")
+    assert result.exit_code == 0
+    assert "Fc1" in result.output
+    assert "nice" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_calls_table_when_tty(invoke, tmp_path, monkeypatch):
+    ch = tmp_path / "acme" / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ch / "calls.json").write_text('[{"id":"R1","name":"standup"}]', encoding="utf-8")
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "calls")
+    assert result.exit_code == 0
+    assert "R1" in result.output
+    assert "standup" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_access_logs_table_when_tty(invoke, tmp_path, monkeypatch):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "access_logs.json").write_text('[{"user_id":"U1","ip":"9.9.9.9"}]', encoding="utf-8")
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "access-logs")
+    assert result.exit_code == 0
+    assert "U1" in result.output
+    assert "9.9.9.9" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_integration_logs_table_when_tty(invoke, tmp_path, monkeypatch):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "integration_logs.json").write_text(
+        '[{"user_id":"U1","service_id":"S1"}]', encoding="utf-8"
+    )
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "integration-logs")
+    assert result.exit_code == 0
+    assert "S1" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_cursors_table_when_tty(invoke, tmp_path, monkeypatch):
+    ch = tmp_path / "acme" / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ch / ".cursor").write_text("9.0", encoding="utf-8")
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "cursor")
+    assert result.exit_code == 0
+    assert "C123" in result.output
+    assert "9.0" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_teams_table_when_tty(invoke, tmp_path, monkeypatch):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "teams.json").write_text('[{"id":"T1","name":"Acme"}]', encoding="utf-8")
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "teams")
+    assert result.exit_code == 0
+    assert "T1" in result.output
+    assert "Acme" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_presence_all_table_when_tty(invoke, tmp_path, monkeypatch):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "presence.json").write_text('{"U8":{"presence":"active"}}', encoding="utf-8")
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "presence", "--all")
+    assert result.exit_code == 0
+    assert "U8" in result.output
+    assert "active" in result.output
+    assert not result.output.lstrip().startswith("{")
+
+
+def test_query_usergroup_users_table_when_tty(invoke, tmp_path, monkeypatch):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "usergroups.json").write_text(
+        '[{"id":"S1","handle":"eng","users":["U1"]}]', encoding="utf-8"
+    )
+    (ws / "users.json").write_text('{"U1":{"id":"U1","handle":"alice"}}', encoding="utf-8")
+    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", "usergroup-users", "eng")
+    assert result.exit_code == 0
+    assert "U1" in result.output
+    assert not result.output.lstrip().startswith("{")
 
 
 def test_query_users_info(invoke, tmp_path):
@@ -581,8 +1236,7 @@ def test_query_usergroups_search(invoke, tmp_path):
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
     (ws / "usergroups.json").write_text(
-        '[{"id":"S1","handle":"eng","name":"Engineering"},'
-        '{"id":"S2","handle":"ops","name":"Ops"}]',
+        '[{"id":"S1","handle":"eng","name":"Engineering"},{"id":"S2","handle":"ops","name":"Ops"}]',
         encoding="utf-8",
     )
     result = invoke("--output", str(tmp_path), "query", "usergroups", "--search", "eng")
@@ -709,9 +1363,7 @@ def test_query_members_search(invoke, tmp_path):
         '{"U1":{"id":"U1","handle":"alice"},"U2":{"id":"U2","handle":"bob"}}',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "members", "C123", "--search", "alice"
-    )
+    result = invoke("--output", str(tmp_path), "query", "members", "C123", "--search", "alice")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["members"] == ["U1"]
@@ -805,9 +1457,7 @@ def test_query_comments_search(invoke, tmp_path):
         '"comments":[{"id":"Fc1","comment":"nice"},{"id":"Fc2","comment":"also"}]}],"thread":[]}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "comments", "F1", "--search", "nice"
-    )
+    result = invoke("--output", str(tmp_path), "query", "comments", "F1", "--search", "nice")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [c["id"] for c in data["comments"]] == ["Fc1"]
@@ -882,9 +1532,7 @@ def test_query_usergroup_users_cursor(invoke, tmp_path):
     (ws / "usergroups.json").write_text(
         '[{"id":"S1","handle":"eng","users":["U1","U2"]}]', encoding="utf-8"
     )
-    first = invoke(
-        "--output", str(tmp_path), "query", "usergroup-users", "eng", "--limit", "1"
-    )
+    first = invoke("--output", str(tmp_path), "query", "usergroup-users", "eng", "--limit", "1")
     cursor = json.loads(first.output)["response_metadata"]["next_cursor"]
     result = invoke(
         "--output",
@@ -938,9 +1586,7 @@ def test_query_billable(invoke, tmp_path):
     ch = ws / "general_C123"
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
-    (ws / "billable_info.json").write_text(
-        '{"U1":{"billing_active":true}}', encoding="utf-8"
-    )
+    (ws / "billable_info.json").write_text('{"U1":{"billing_active":true}}', encoding="utf-8")
     result = invoke("--output", str(tmp_path), "query", "billable")
     assert result.exit_code == 0
     data = json.loads(result.output)
@@ -985,9 +1631,7 @@ def test_query_integration_logs_search(invoke, tmp_path):
         '[{"user_id":"U1","service_id":"S1"},{"user_id":"U2","service_id":"S2"}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "integration-logs", "--search", "S1"
-    )
+    result = invoke("--output", str(tmp_path), "query", "integration-logs", "--search", "S1")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [row["user_id"] for row in data["logs"]] == ["U1"]
@@ -1034,9 +1678,7 @@ def test_query_participants_search(invoke, tmp_path):
         '"room":{"id":"R1","participant_history":["U1","U2"]}}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "participants", "R1", "--search", "U2"
-    )
+    result = invoke("--output", str(tmp_path), "query", "participants", "R1", "--search", "U2")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [p["slack_id"] for p in data["participants"]] == ["U2"]
@@ -1047,9 +1689,7 @@ def test_query_bots_list(invoke, tmp_path):
     ch = ws / "general_C123"
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
-    (ws / "bots.json").write_text(
-        '{"B1":{"id":"B1","name":"deploybot"}}', encoding="utf-8"
-    )
+    (ws / "bots.json").write_text('{"B1":{"id":"B1","name":"deploybot"}}', encoding="utf-8")
     result = invoke("--output", str(tmp_path), "query", "bots")
     assert result.exit_code == 0
     data = json.loads(result.output)
@@ -1189,12 +1829,8 @@ def test_query_users_no_message_users(invoke, tmp_path):
         '"reactions":[],"files":[],"thread":[]}]',
         encoding="utf-8",
     )
-    (ws / "users.json").write_text(
-        '{"U1":{"id":"U1","handle":"alice"}}', encoding="utf-8"
-    )
-    result = invoke(
-        "--output", str(tmp_path), "query", "users", "--no-message-users"
-    )
+    (ws / "users.json").write_text('{"U1":{"id":"U1","handle":"alice"}}', encoding="utf-8")
+    result = invoke("--output", str(tmp_path), "query", "users", "--no-message-users")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert {u["id"] for u in data["members"]} == {"U1"}
@@ -1206,13 +1842,10 @@ def test_query_files_ts_from(invoke, tmp_path):
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
     (ws / "files.json").write_text(
-        '[{"id":"Fold","name":"old.txt","created":10},'
-        '{"id":"Fnew","name":"new.txt","created":50}]',
+        '[{"id":"Fold","name":"old.txt","created":10},{"id":"Fnew","name":"new.txt","created":50}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "files", "--ts-from", "20", "--ts-to", "60"
-    )
+    result = invoke("--output", str(tmp_path), "query", "files", "--ts-from", "20", "--ts-to", "60")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert {f["id"] for f in data["files"]} == {"Fnew"}
@@ -1228,9 +1861,7 @@ def test_query_channels_exclude_archived(invoke, tmp_path):
         '{"id":"C999","name":"old","is_archived":true,"is_channel":true}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "channels", "--exclude-archived"
-    )
+    result = invoke("--output", str(tmp_path), "query", "channels", "--exclude-archived")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert {c["id"] for c in data["channels"]} == {"C123"}
@@ -1246,9 +1877,7 @@ def test_query_history_oldest(invoke, tmp_path):
         '"reactions":[],"files":[],"thread":[]}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "history", "C123", "--oldest", "1.5"
-    )
+    result = invoke("--output", str(tmp_path), "query", "history", "C123", "--oldest", "1.5")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [m["text"] for m in data["messages"]] == ["new"]
@@ -1264,9 +1893,7 @@ def test_query_history_search(invoke, tmp_path):
         '"reactions":[],"files":[],"thread":[]}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "history", "C123", "--search", "old"
-    )
+    result = invoke("--output", str(tmp_path), "query", "history", "C123", "--search", "old")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [m["text"] for m in data["messages"]] == ["old"]
@@ -1349,9 +1976,7 @@ def test_query_scheduled_oldest(invoke, tmp_path):
         '{"id":"Q2","channel_id":"C123","post_at":50}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "scheduled", "--oldest", "20"
-    )
+    result = invoke("--output", str(tmp_path), "query", "scheduled", "--oldest", "20")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [m["id"] for m in data["scheduled_messages"]] == ["Q2"]
@@ -1363,13 +1988,10 @@ def test_query_reminders_no_complete(invoke, tmp_path):
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
     (ws / "reminders.json").write_text(
-        '[{"id":"Rm1","text":"open","complete_ts":0},'
-        '{"id":"Rm2","text":"done","complete":true}]',
+        '[{"id":"Rm1","text":"open","complete_ts":0},{"id":"Rm2","text":"done","complete":true}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "reminders", "--no-complete"
-    )
+    result = invoke("--output", str(tmp_path), "query", "reminders", "--no-complete")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [r["id"] for r in data["reminders"]] == ["Rm1"]
@@ -1403,9 +2025,7 @@ def test_query_integration_logs_app_id(invoke, tmp_path):
         '{"user_id":"U2","service_id":"S2","app_id":"A2"}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "integration-logs", "--app-id", "A1"
-    )
+    result = invoke("--output", str(tmp_path), "query", "integration-logs", "--app-id", "A1")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [row["service_id"] for row in data["logs"]] == ["S1"]
@@ -1445,13 +2065,10 @@ def test_query_usergroups_include_disabled(invoke, tmp_path):
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
     (ws / "usergroups.json").write_text(
-        '[{"id":"S1","handle":"eng","date_delete":0},'
-        '{"id":"S2","handle":"old","date_delete":9}]',
+        '[{"id":"S1","handle":"eng","date_delete":0},{"id":"S2","handle":"old","date_delete":9}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "usergroups", "--include-disabled"
-    )
+    result = invoke("--output", str(tmp_path), "query", "usergroups", "--include-disabled")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [g["id"] for g in data["usergroups"]] == ["S1", "S2"]
@@ -1567,9 +2184,7 @@ def test_query_team_profile_search(invoke, tmp_path):
         '{"fields":[{"id":"Xf1","label":"Title"},{"id":"Xf2","label":"Dept"}]}',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "team-profile", "--search", "Title"
-    )
+    result = invoke("--output", str(tmp_path), "query", "team-profile", "--search", "Title")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [f["id"] for f in data["profile"]["fields"]] == ["Xf1"]
@@ -1600,9 +2215,7 @@ def test_query_search_sort_dir(invoke, tmp_path):
         '"reactions":[],"files":[],"thread":[]}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "search", "hit", "--sort-dir", "asc"
-    )
+    result = invoke("--output", str(tmp_path), "query", "search", "hit", "--sort-dir", "asc")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [m["text"] for m in data["messages"]["matches"]] == ["hit one", "hit two"]
@@ -1642,9 +2255,7 @@ def test_query_files_page(invoke, tmp_path):
         '[{"id":"Fa","name":"a.txt"},{"id":"Fb","name":"b.txt"}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "files", "--count", "1", "--page", "2"
-    )
+    result = invoke("--output", str(tmp_path), "query", "files", "--count", "1", "--page", "2")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [f["id"] for f in data["files"]] == ["Fb"]
@@ -1698,9 +2309,7 @@ def test_query_usergroups_include_count(invoke, tmp_path):
     (ws / "usergroups.json").write_text(
         '[{"id":"S1","handle":"eng","users":["U1","U2"]}]', encoding="utf-8"
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "usergroups", "--include-count"
-    )
+    result = invoke("--output", str(tmp_path), "query", "usergroups", "--include-count")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["usergroups"][0]["user_count"] == 2
@@ -1922,9 +2531,7 @@ def test_query_pins_cursor(invoke, tmp_path):
         '{"type":"message","channel":"C123","message":{"text":"b"}}]',
         encoding="utf-8",
     )
-    first = invoke(
-        "--output", str(tmp_path), "query", "pins", "C123", "--count", "1"
-    )
+    first = invoke("--output", str(tmp_path), "query", "pins", "C123", "--count", "1")
     cursor = json.loads(first.output)["response_metadata"]["next_cursor"]
     result = invoke(
         "--output", str(tmp_path), "query", "pins", "C123", "--count", "1", "--cursor", cursor
@@ -1973,9 +2580,7 @@ def test_query_bots_page(invoke, tmp_path):
         '{"B1":{"id":"B1","name":"alpha"},"B2":{"id":"B2","name":"beta"}}',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "bots", "--count", "1", "--page", "2"
-    )
+    result = invoke("--output", str(tmp_path), "query", "bots", "--count", "1", "--page", "2")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [b["id"] for b in data["bots"]] == ["B2"]
@@ -1992,9 +2597,7 @@ def test_query_bots_cursor(invoke, tmp_path):
     )
     first = invoke("--output", str(tmp_path), "query", "bots", "--count", "1")
     cursor = json.loads(first.output)["response_metadata"]["next_cursor"]
-    result = invoke(
-        "--output", str(tmp_path), "query", "bots", "--count", "1", "--cursor", cursor
-    )
+    result = invoke("--output", str(tmp_path), "query", "bots", "--count", "1", "--cursor", cursor)
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [b["id"] for b in data["bots"]] == ["B2"]
@@ -2025,9 +2628,7 @@ def test_query_rtm_start(invoke, tmp_path):
         '{"user_id":"U1","user":"alice","team_id":"T99","team":"Acme"}',
         encoding="utf-8",
     )
-    (ws / "users.json").write_text(
-        '{"U1":{"id":"U1","handle":"alice"}}', encoding="utf-8"
-    )
+    (ws / "users.json").write_text('{"U1":{"id":"U1","handle":"alice"}}', encoding="utf-8")
     result = invoke("--output", str(tmp_path), "query", "rtm", "--start")
     assert result.exit_code == 0
     data = json.loads(result.output)
@@ -2045,9 +2646,7 @@ def test_query_stars_page(invoke, tmp_path):
         '{"type":"message","channel":"C123","message":{"text":"b"}}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "stars", "--count", "1", "--page", "2"
-    )
+    result = invoke("--output", str(tmp_path), "query", "stars", "--count", "1", "--page", "2")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [item["message"]["text"] for item in data["items"]] == ["b"]
@@ -2065,9 +2664,7 @@ def test_query_stars_cursor(invoke, tmp_path):
     )
     first = invoke("--output", str(tmp_path), "query", "stars", "--count", "1")
     cursor = json.loads(first.output)["response_metadata"]["next_cursor"]
-    result = invoke(
-        "--output", str(tmp_path), "query", "stars", "--count", "1", "--cursor", cursor
-    )
+    result = invoke("--output", str(tmp_path), "query", "stars", "--count", "1", "--cursor", cursor)
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [item["message"]["text"] for item in data["items"]] == ["b"]
@@ -2097,9 +2694,7 @@ def test_query_external_teams_search(invoke, tmp_path):
         '[{"id":"E1","name":"Partner"},{"id":"E2","name":"Other"}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "external-teams", "--search", "part"
-    )
+    result = invoke("--output", str(tmp_path), "query", "external-teams", "--search", "part")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [t["id"] for t in data["teams"]] == ["E1"]
@@ -2137,9 +2732,7 @@ def test_query_bookmarks_cursor(invoke, tmp_path):
         '[{"id":"Bk1","title":"a"},{"id":"Bk2","title":"b"}]',
         encoding="utf-8",
     )
-    first = invoke(
-        "--output", str(tmp_path), "query", "bookmarks", "C123", "--count", "1"
-    )
+    first = invoke("--output", str(tmp_path), "query", "bookmarks", "C123", "--count", "1")
     cursor = json.loads(first.output)["response_metadata"]["next_cursor"]
     result = invoke(
         "--output",
@@ -2166,9 +2759,7 @@ def test_query_scheduled_page(invoke, tmp_path):
         '[{"id":"Q1","text":"a"},{"id":"Q2","text":"b"}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "scheduled", "--count", "1", "--page", "2"
-    )
+    result = invoke("--output", str(tmp_path), "query", "scheduled", "--count", "1", "--page", "2")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [m["id"] for m in data["scheduled_messages"]] == ["Q2"]
@@ -2206,9 +2797,7 @@ def test_query_calls_page(invoke, tmp_path):
         '"room":{"id":"R2","name":"b"}}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "calls", "--count", "1", "--page", "2"
-    )
+    result = invoke("--output", str(tmp_path), "query", "calls", "--count", "1", "--page", "2")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [c["id"] for c in data["calls"]] == ["R2"]
@@ -2229,9 +2818,7 @@ def test_query_calls_cursor(invoke, tmp_path):
     )
     first = invoke("--output", str(tmp_path), "query", "calls", "--count", "1")
     cursor = json.loads(first.output)["response_metadata"]["next_cursor"]
-    result = invoke(
-        "--output", str(tmp_path), "query", "calls", "--count", "1", "--cursor", cursor
-    )
+    result = invoke("--output", str(tmp_path), "query", "calls", "--count", "1", "--cursor", cursor)
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [c["id"] for c in data["calls"]] == ["R2"]
@@ -2270,9 +2857,7 @@ def test_query_integration_logs_cursor(invoke, tmp_path):
         '[{"user_id":"U1","service_id":"S1"},{"user_id":"U2","service_id":"S2"}]',
         encoding="utf-8",
     )
-    first = invoke(
-        "--output", str(tmp_path), "query", "integration-logs", "--count", "1"
-    )
+    first = invoke("--output", str(tmp_path), "query", "integration-logs", "--count", "1")
     cursor = json.loads(first.output)["response_metadata"]["next_cursor"]
     result = invoke(
         "--output",
@@ -2298,9 +2883,7 @@ def test_query_reminders_page(invoke, tmp_path):
         '[{"id":"Rm1","text":"a"},{"id":"Rm2","text":"b"}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "reminders", "--count", "1", "--page", "2"
-    )
+    result = invoke("--output", str(tmp_path), "query", "reminders", "--count", "1", "--page", "2")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [r["id"] for r in data["reminders"]] == ["Rm2"]
@@ -2334,9 +2917,7 @@ def test_query_usergroups_page(invoke, tmp_path):
         '[{"id":"S1","handle":"eng"},{"id":"S2","handle":"ops"}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "usergroups", "--count", "1", "--page", "2"
-    )
+    result = invoke("--output", str(tmp_path), "query", "usergroups", "--count", "1", "--page", "2")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [g["id"] for g in data["usergroups"]] == ["S2"]
@@ -2388,9 +2969,7 @@ def test_query_reactions_list(invoke, tmp_path):
         '"files":[],"thread":[]}]',
         encoding="utf-8",
     )
-    result = invoke(
-        "--output", str(tmp_path), "query", "reactions", "--count", "1", "--page", "2"
-    )
+    result = invoke("--output", str(tmp_path), "query", "reactions", "--count", "1", "--page", "2")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [row["reaction"] for row in data["items"]] == ["b"]
@@ -2527,9 +3106,7 @@ def test_query_external_teams_cursor(invoke, tmp_path):
         '[{"id":"E1","name":"A"},{"id":"E2","name":"B"}]',
         encoding="utf-8",
     )
-    first = invoke(
-        "--output", str(tmp_path), "query", "external-teams", "--count", "1"
-    )
+    first = invoke("--output", str(tmp_path), "query", "external-teams", "--count", "1")
     cursor = json.loads(first.output)["response_metadata"]["next_cursor"]
     result = invoke(
         "--output",
@@ -2579,9 +3156,7 @@ def test_query_teams_cursor(invoke, tmp_path):
         '[{"id":"T1","name":"A"},{"id":"T2","name":"B"}]',
         encoding="utf-8",
     )
-    first = invoke(
-        "--output", str(tmp_path), "query", "teams", "--count", "1"
-    )
+    first = invoke("--output", str(tmp_path), "query", "teams", "--count", "1")
     cursor = json.loads(first.output)["response_metadata"]["next_cursor"]
     result = invoke(
         "--output",
@@ -2624,9 +3199,7 @@ def test_query_convos_limit(invoke, tmp_path):
             f'{{"id":"{cid}","name":"chan","is_channel":true}}',
             encoding="utf-8",
         )
-    result = invoke(
-        "--output", str(tmp_path), "query", "convos", "U1", "--limit", "1"
-    )
+    result = invoke("--output", str(tmp_path), "query", "convos", "U1", "--limit", "1")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert len(data["channels"]) == 1
@@ -2643,9 +3216,7 @@ def test_query_convos_search(invoke, tmp_path):
             f'{{"id":"{cid}","name":"{name}","is_channel":true}}',
             encoding="utf-8",
         )
-    result = invoke(
-        "--output", str(tmp_path), "query", "convos", "U1", "--search", "ops"
-    )
+    result = invoke("--output", str(tmp_path), "query", "convos", "U1", "--search", "ops")
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [c["id"] for c in data["channels"]] == ["C456"]

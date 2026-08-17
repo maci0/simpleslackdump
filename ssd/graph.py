@@ -5,21 +5,44 @@ from pathlib import Path
 from typing import Any
 
 _MENTION_RE = re.compile(r"@([A-Za-z0-9_.\-]+)")
+_USER_ID_RE = re.compile(r"<@([UW][A-Z0-9]+)>")
+
+
+def _ts_from_thread_dir(name: str) -> str | None:
+    if not name.startswith("thread_"):
+        return None
+    rest = name[len("thread_") :]
+    if "_" not in rest:
+        return None
+    return rest.replace("_", ".", 1)
+
+
+def _note_user(id_to_name: dict[str, str], msg: dict[str, Any]) -> str:
+    name = msg.get("user_name") or "unknown"
+    uid = str(msg.get("user") or "")
+    if uid and name != "unknown":
+        id_to_name[uid] = name
+    return name
+
+
+def _msg_blobs(msg: dict[str, Any]) -> tuple[str, str]:
+    return (msg.get("text") or "", msg.get("text_raw") or "")
 
 
 def build_graph(dirs: list[Path]) -> dict[str, Any]:
     """Build a user interaction graph from one or more channel message dirs.
 
-    Reads each messages.json once, buffering (sender, text) pairs for the
+    Reads each messages.json once, buffering (sender, text, text_raw) for the
     mention scan which runs after all users are known. Standalone thread dumps
-    under thread_*/thread.json are also collected in the same pass.
+    under thread_*/thread.json are also collected in the same pass. The parent
+    in a thread dump (ts matching the folder) counts as a message, not a reply.
     """
     edges: dict[tuple[str, str], int] = defaultdict(int)
     user_messages: dict[str, int] = defaultdict(int)
     user_replies: dict[str, int] = defaultdict(int)
     channels = []
-    # Buffer (sender, text) pairs for mention scan after all users known
-    msg_texts: list[tuple[str, str]] = []
+    msg_texts: list[tuple[str, str, str]] = []
+    id_to_name: dict[str, str] = {}
 
     for d in dirs:
         if not d.is_dir():
@@ -29,18 +52,20 @@ def build_graph(dirs: list[Path]) -> dict[str, Any]:
             channels.append(d.name)
             messages = json.loads(msg_file.read_text())
             for msg in messages:
-                sender = msg.get("user_name") or "unknown"
+                sender = _note_user(id_to_name, msg)
                 if sender != "unknown":
                     user_messages[sender] += 1
-                    msg_texts.append((sender, msg.get("text", "")))
+                    text, text_raw = _msg_blobs(msg)
+                    msg_texts.append((sender, text, text_raw))
                 for reply in msg.get("thread", []):
-                    replier = reply.get("user_name") or "unknown"
+                    replier = _note_user(id_to_name, reply)
                     if replier == "unknown":
                         continue
                     user_replies[replier] += 1
                     if replier != sender:
                         edges[(replier, sender)] += 1
-                    msg_texts.append((replier, reply.get("text", "")))
+                    text, text_raw = _msg_blobs(reply)
+                    msg_texts.append((replier, text, text_raw))
 
         # standalone thread dumps (thread_<ts>/thread.json)
         for thread_dir in d.iterdir():
@@ -49,23 +74,53 @@ def build_graph(dirs: list[Path]) -> dict[str, Any]:
             tf = thread_dir / "thread.json"
             if not tf.exists():
                 continue
-            for r in json.loads(tf.read_text()):
-                replier = r.get("user_name") or "unknown"
-                if replier != "unknown":
-                    user_replies[replier] += 1
-                    msg_texts.append((replier, r.get("text", "")))
+            rows = json.loads(tf.read_text())
+            parent_ts = _ts_from_thread_dir(thread_dir.name)
+            parent_name = None
+            if parent_ts:
+                for row in rows:
+                    if str(row.get("ts") or "") != parent_ts:
+                        continue
+                    name = _note_user(id_to_name, row)
+                    parent_name = None if name == "unknown" else name
+                    break
+            for row in rows:
+                name = _note_user(id_to_name, row)
+                ts = str(row.get("ts") or "")
+                text, text_raw = _msg_blobs(row)
+                if parent_ts and ts == parent_ts:
+                    if name != "unknown":
+                        user_messages[name] += 1
+                        msg_texts.append((name, text, text_raw))
+                    continue
+                if name == "unknown":
+                    continue
+                user_replies[name] += 1
+                if parent_name and name != parent_name:
+                    edges[(name, parent_name)] += 1
+                msg_texts.append((name, text, text_raw))
 
     all_users = (frozenset(user_messages) | frozenset(user_replies)) - {"unknown"}
 
-    # Mention scan: regex extracts @word candidates, set lookup confirms known user
-    for sender, text in msg_texts:
-        if "@" not in text or sender == "unknown":
+    for sender, text, text_raw in msg_texts:
+        if sender == "unknown":
             continue
-        for raw in _MENTION_RE.findall(text):
-            for candidate in _mention_candidates(raw):
-                if candidate in all_users and candidate != sender:
-                    edges[(sender, candidate)] += 1
-                    break
+        mentioned: set[str] = set()
+        for chunk in (text, text_raw):
+            if not chunk or "@" not in chunk:
+                continue
+            for raw in _MENTION_RE.findall(chunk):
+                for candidate in _mention_candidates(raw):
+                    if candidate in all_users and candidate != sender:
+                        mentioned.add(candidate)
+                        break
+        if text_raw:
+            for uid in _USER_ID_RE.findall(text_raw):
+                candidate = id_to_name.get(uid)
+                if candidate and candidate in all_users and candidate != sender:
+                    mentioned.add(candidate)
+        for candidate in mentioned:
+            edges[(sender, candidate)] += 1
 
     nodes = [
         {"id": u, "messages": user_messages[u], "replies": user_replies[u]}

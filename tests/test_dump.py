@@ -88,6 +88,8 @@ def mock_api():
     api.get_external_teams.return_value = [{"id": "E1", "name": "Partner"}]
     api.get_auth_teams.return_value = [{"id": "T1", "name": "testteam"}]
     api.get_remote_files.return_value = [{"id": "Fr1", "name": "drive.doc", "is_external": True}]
+    api.get_file_info.return_value = {}
+    api.delay = 0
     return api
 
 
@@ -106,11 +108,32 @@ def test_run_dump_writes_messages(tmp_path, mock_api):
     assert data[0]["text"] == "hi"
 
 
+def test_run_dump_prefetches_users_before_enrich(tmp_path, mock_api):
+    order: list[str] = []
+    users_ret = mock_api.fetch_workspace_users.return_value
+    mock_api.fetch_workspace_users.side_effect = lambda: order.append("users") or users_ret
+    enrich_ret = mock_api.enrich.return_value
+    mock_api.enrich.side_effect = lambda *a, **k: order.append("enrich") or enrich_ret
+    run_dump(mock_api, "testteam", "C123", str(tmp_path))
+    assert "users" in order
+    assert "enrich" in order
+    assert order.index("users") < order.index("enrich")
+
+
 def test_run_dump_cursor_is_latest_ts(tmp_path, mock_api):
     run_dump(mock_api, "testteam", "C123", str(tmp_path))
     out_dir = tmp_path / "testteam" / "general_C123"
     cursor = (out_dir / ".cursor").read_text().strip()
     assert cursor == "1705320720.000000"
+
+
+def test_dump_refreshes_stale_workspace_sidecar(tmp_path, mock_api):
+    ws = tmp_path / "testteam"
+    ws.mkdir()
+    (ws / "stars.json").write_text('[{"type":"message","channel":"OLD"}]', encoding="utf-8")
+    run_dump(mock_api, "testteam", "C123", str(tmp_path))
+    stars = json.loads((ws / "stars.json").read_text())
+    assert stars[0]["channel"] == "C123"
 
 
 def test_run_dump_writes_sidecars(tmp_path, mock_api):
@@ -133,12 +156,13 @@ def test_run_dump_writes_sidecars(tmp_path, mock_api):
     assert json.loads((tmp_path / "testteam" / "reminders.json").read_text())[0]["id"] == "Rm1"
     dnd = json.loads((tmp_path / "testteam" / "dnd.json").read_text())
     assert dnd["U1"]["dnd_enabled"] is False
-    assert json.loads((tmp_path / "testteam" / "team_profile.json").read_text())["fields"][0][
-        "id"
-    ] == "Xf1"
-    assert json.loads((tmp_path / "testteam" / "scheduled_messages.json").read_text())[0][
-        "id"
-    ] == "Q1"
+    assert (
+        json.loads((tmp_path / "testteam" / "team_profile.json").read_text())["fields"][0]["id"]
+        == "Xf1"
+    )
+    assert (
+        json.loads((tmp_path / "testteam" / "scheduled_messages.json").read_text())[0]["id"] == "Q1"
+    )
     assert json.loads((tmp_path / "testteam" / "team.json").read_text())["id"] == "T1"
     assert json.loads((tmp_path / "testteam" / "files.json").read_text())[0]["id"] == "Fws"
     presence = json.loads((tmp_path / "testteam" / "presence.json").read_text())
@@ -239,6 +263,59 @@ def test_run_dump_thread_url(tmp_path, mock_api):
     )
     mock_api.get_replies.assert_called_once()
     mock_api.enrich_reply.assert_called_once_with(raw_reply, channel_id="C123")
+    assert mock_api.get_replies.call_args.kwargs.get("include_parent") is True
+
+
+def test_run_dump_thread_prefetches_users_before_enrich(tmp_path, mock_api):
+    order: list[str] = []
+    users_ret = mock_api.fetch_workspace_users.return_value
+    mock_api.fetch_workspace_users.side_effect = lambda: order.append("users") or users_ret
+    mock_api.get_replies.return_value = [
+        {"ts": "1.1", "user": "U2", "text": "reply", "reactions": [], "files": []}
+    ]
+    mock_api.enrich_reply.side_effect = lambda r, channel_id=None: (
+        order.append("enrich")
+        or {
+            "ts": r["ts"],
+            "user": r["user"],
+            "user_name": "bob",
+            "text": r["text"],
+            "reactions": [],
+            "files": [],
+        }
+    )
+    run_dump(
+        mock_api,
+        "testteam",
+        "https://testteam.slack.com/archives/C123/p1705320720000000",
+        str(tmp_path),
+    )
+    assert order.index("users") < order.index("enrich")
+
+
+def test_run_dump_thread_writes_parent(tmp_path, mock_api):
+    mock_api.get_replies.return_value = [
+        {"ts": "1.0", "user": "U1", "text": "root"},
+        {"ts": "1.1", "user": "U2", "text": "reply"},
+    ]
+    mock_api.enrich_reply.side_effect = lambda r, channel_id=None: {
+        "ts": r["ts"],
+        "user": r["user"],
+        "user_name": "n",
+        "text": r["text"],
+        "reactions": [],
+        "files": [],
+    }
+    run_dump(
+        mock_api,
+        "testteam",
+        "https://testteam.slack.com/archives/C123/p1705320720000000",
+        str(tmp_path),
+    )
+    thread_json = next((tmp_path / "testteam").rglob("thread.json"))
+    rows = json.loads(thread_json.read_text())
+    assert [m["ts"] for m in rows] == ["1.0", "1.1"]
+    assert rows[0]["text"] == "root"
 
 
 def test_run_dump_writes_bots(tmp_path, mock_api):
@@ -272,3 +349,72 @@ def test_run_dump_writes_bots(tmp_path, mock_api):
     assert bots["B99"]["team_id"] == "T1"
     assert bots["B99"]["updated"] == 9
     assert bots["B99"]["is_workflow_bot"] is True
+
+
+def test_dump_presence_includes_channel_members(tmp_path, mock_api):
+    mock_api.get_channel_members.return_value = ["U1", "U2"]
+    mock_api.get_presence.side_effect = lambda uid: {"presence": "away", "user": uid}
+    run_dump(mock_api, "testteam", "C123", str(tmp_path))
+    presence = json.loads((tmp_path / "testteam" / "presence.json").read_text())
+    assert "U1" in presence
+    assert "U2" in presence
+
+
+def test_dump_presence_merges_second_channel(tmp_path, mock_api):
+    mock_api.get_channel_members.return_value = ["U1"]
+    mock_api.get_presence.side_effect = lambda uid: {"presence": "away", "user": uid}
+    run_dump(mock_api, "testteam", "C123", str(tmp_path))
+    mock_api.resolve_channel.return_value = ("C999", "other")
+    mock_api.get_channel_members.return_value = ["U3"]
+    run_dump(mock_api, "testteam", "C999", str(tmp_path))
+    presence = json.loads((tmp_path / "testteam" / "presence.json").read_text())
+    assert "U1" in presence
+    assert "U3" in presence
+
+
+def test_dump_file_comments(tmp_path, mock_api):
+    fobj = {
+        "id": "F1",
+        "name": "shot.png",
+        "url_private": "https://files.slack.com/shot.png",
+        "comments_count": 2,
+    }
+    mock_api.get_files.return_value = [dict(fobj)]
+    mock_api.enrich.return_value = [
+        {
+            "ts": "1705320720.000000",
+            "user": "U1",
+            "user_name": "alice",
+            "text": "hi",
+            "reactions": [],
+            "thread": [],
+            "files": [dict(fobj)],
+        }
+    ]
+    mock_api.get_file_info.return_value = {
+        "id": "F1",
+        "comments": [{"id": "Fc1", "comment": "nice", "user": "U2"}],
+        "comments_count": 2,
+    }
+    run_dump(mock_api, "testteam", "C123", str(tmp_path))
+    files = json.loads((tmp_path / "testteam" / "files.json").read_text())
+    assert files[0]["comments"][0]["comment"] == "nice"
+    ch = tmp_path / "testteam" / "general_C123"
+    ch_files = json.loads((ch / "files.json").read_text())
+    assert ch_files[0]["comments"][0]["id"] == "Fc1"
+
+
+def test_dump_canvases(tmp_path, mock_api):
+    mock_api.get_files.return_value = [
+        {"id": "Fc", "name": "notes", "filetype": "canvas", "title": "notes"},
+        {
+            "id": "F1",
+            "name": "shot.png",
+            "url_private": "https://files.slack.com/shot.png",
+            "comments_count": 0,
+        },
+    ]
+    run_dump(mock_api, "testteam", "C123", str(tmp_path))
+    canvases = json.loads((tmp_path / "testteam" / "canvases.json").read_text())
+    assert canvases[0]["id"] == "Fc"
+    assert all(c["filetype"] == "canvas" for c in canvases)

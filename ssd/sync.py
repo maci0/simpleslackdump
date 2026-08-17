@@ -5,7 +5,7 @@ from pathlib import Path
 import click
 
 from ssd.api import SlackAPI
-from ssd.dump import _write_sidecars, write_channel_stats
+from ssd.dump import _prefetch_users, _write_sidecars, write_channel_stats
 from ssd.output import (
     _atomic_write,
     _dumps,
@@ -40,6 +40,7 @@ def _refresh_old_threads(
     if not messages_path.exists():
         return
     stored: list[dict] = json.loads(messages_path.read_text())
+    _prefetch_users(api)
     refreshed = 0
     for msg in stored:
         # Skip messages at or after the sync floor — already enriched in this run
@@ -121,13 +122,16 @@ def run_sync(
         thread_dir = out_dir / f"thread_{parsed.thread_ts.replace('.', '_')}"
         thread_dir.mkdir(parents=True, exist_ok=True)  # single mkdir
         oldest = _since_to_ts(since) if since else read_cursor(thread_dir)
-        raw_replies = api.get_replies(channel_id, parsed.thread_ts, oldest=oldest)
+        raw_replies = api.get_replies(
+            channel_id, parsed.thread_ts, oldest=oldest, include_parent=not oldest
+        )
         # oldest= is inclusive — filter to strictly newer replies to avoid reprocessing cursor
         if oldest:
             raw_replies = [r for r in raw_replies if float(r["ts"]) > float(oldest)]
         if not raw_replies:
             click.echo("  no new replies")
             return
+        _prefetch_users(api)
         enriched = [api.enrich_reply(r, channel_id=channel_id) for r in raw_replies]
         if attachments_enabled and token:
             from ssd.attachments import download_attachments
@@ -146,7 +150,7 @@ def run_sync(
         _atomic_write(thread_dir / "thread.md", format_markdown(sorted_msgs))
         write_cursor(thread_dir, max(m["ts"] for m in enriched))
         write_users(thread_dir, api.get_user_profiles())
-        _write_sidecars(api, out_dir, channel_id)
+        _write_sidecars(api, out_dir, channel_id, refresh_workspace=False)
         click.echo(f"  thread {parsed.thread_ts}: {len(enriched)} new replies")
         return
 
@@ -171,6 +175,7 @@ def run_sync(
 
     raw_msgs = api.get_messages(channel_id, oldest=oldest)
     if raw_msgs:
+        _prefetch_users(api)
         enriched = api.enrich(channel_id, raw_msgs)
         if attachments_enabled and token:
             from ssd.attachments import download_attachments
@@ -193,5 +198,5 @@ def run_sync(
         )
 
     write_users(out_dir, api.get_user_profiles())
-    _write_sidecars(api, out_dir, channel_id)
-    write_channel_stats(out_dir)
+    _write_sidecars(api, out_dir, channel_id, refresh_workspace=False)
+    write_channel_stats(out_dir, api=api)

@@ -1,3 +1,4 @@
+from itertools import islice
 from unittest.mock import MagicMock
 
 import pytest
@@ -35,6 +36,17 @@ def test_resolve_channel_by_name(mock_client):
     cid, name = api.resolve_channel("random")
     assert cid == "C456"
     assert name == "random"
+
+
+def test_resolve_channel_by_name_reuses_conversation_cache(mock_client):
+    mock_client.conversations_list.return_value = {
+        "channels": [{"id": "C456", "name": "random"}],
+        "response_metadata": {"next_cursor": ""},
+    }
+    api = SlackAPI("xoxd-fake", delay=0)
+    api.resolve_channel("random")
+    api.resolve_channel("#random")
+    assert mock_client.conversations_list.call_count == 1
 
 
 def test_get_messages_paginates(mock_client):
@@ -406,6 +418,20 @@ def test_get_replies_excludes_root(mock_client):
     assert replies[0]["ts"] == "1.1"
 
 
+def test_get_replies_include_parent(mock_client):
+    mock_client.conversations_replies.return_value = {
+        "messages": [
+            {"ts": "1.0", "user": "U1", "text": "root"},
+            {"ts": "1.1", "user": "U2", "text": "reply"},
+        ],
+        "has_more": False,
+        "response_metadata": {"next_cursor": ""},
+    }
+    api = SlackAPI("xoxd-fake", delay=0)
+    replies = api.get_replies("C123", "1.0", include_parent=True)
+    assert [m["ts"] for m in replies] == ["1.0", "1.1"]
+
+
 def test_get_replies_passes_oldest(mock_client):
     mock_client.conversations_replies.return_value = {
         "messages": [
@@ -448,6 +474,23 @@ def test_enrich_adds_user_name_and_thread(mock_client):
     assert msg["thread"][0]["user_name"] == "alice"
 
 
+def test_enrich_skips_users_info_after_workspace_list(mock_client):
+    mock_client.users_list.return_value = {
+        "members": [
+            {
+                "id": "U1",
+                "name": "alice",
+                "profile": {"display_name_normalized": "alice", "real_name": "Alice"},
+            }
+        ],
+        "response_metadata": {"next_cursor": ""},
+    }
+    api = SlackAPI("xoxd-fake", delay=0)
+    api.fetch_workspace_users()
+    api.enrich("C123", [{"ts": "1.0", "user": "U1", "text": "hi", "reply_count": 0}])
+    mock_client.users_info.assert_not_called()
+
+
 def test_enrich_no_replies(mock_client):
     mock_client.users_info.return_value = {
         "user": {"profile": {"display_name_normalized": "bob", "real_name": "Bob Jones"}}
@@ -461,6 +504,23 @@ def test_enrich_no_replies(mock_client):
     assert enriched[0]["thread"] == []
     assert enriched[0]["user_name"] == "bob"
     mock_client.conversations_replies.assert_not_called()
+
+
+def test_enrich_keeps_text_raw(mock_client):
+    mock_client.users_info.return_value = {
+        "user": {
+            "id": "U99",
+            "profile": {"display_name_normalized": "zoe", "real_name": "Zoe"},
+        }
+    }
+    api = SlackAPI("xoxd-fake", delay=0)
+    enriched = api.enrich(
+        "C123",
+        [{"ts": "1.0", "user": "U99", "text": "hi <@U99>", "reply_count": 0}],
+    )
+    assert enriched[0]["text_raw"] == "hi <@U99>"
+    assert "@zoe" in enriched[0]["text"]
+    assert "<@U99>" not in enriched[0]["text"]
 
 
 def test_enrich_bot_message_no_user(mock_client):
@@ -909,6 +969,19 @@ def test_get_files_paginates(mock_client):
     assert mock_client.files_list.call_args.kwargs.get("show_files_hidden_by_limit") is True
 
 
+def test_get_file_info_attaches_comments(mock_client):
+    mock_client.files_info.return_value = {
+        "ok": True,
+        "file": {"id": "F1", "name": "shot.png", "comments_count": 1},
+        "comments": [{"id": "Fc1", "comment": "nice"}],
+    }
+    api = SlackAPI("xoxd-fake", delay=0)
+    info = api.get_file_info("F1")
+    assert info["id"] == "F1"
+    assert info["comments"][0]["comment"] == "nice"
+    mock_client.files_info.assert_called_once_with(file="F1")
+
+
 def test_get_remote_files_paginates(mock_client):
     mock_client.files_remote_list.side_effect = [
         {
@@ -962,9 +1035,7 @@ def test_get_external_teams_cached(mock_client):
 
 
 def test_get_billable_info_cached(mock_client):
-    mock_client.team_billableInfo.return_value = {
-        "billable_info": {"U1": {"billing_active": True}}
-    }
+    mock_client.team_billableInfo.return_value = {"billable_info": {"U1": {"billing_active": True}}}
     api = SlackAPI("xoxd-fake")
     info = api.get_billable_info()
     api.get_billable_info()
@@ -994,3 +1065,117 @@ def test_get_access_logs_paginates(mock_client):
     assert [row["ip"] for row in rows] == ["1.1.1.1", "2.2.2.2"]
     api.get_access_logs()
     assert mock_client.team_accessLogs.call_count == 2
+
+
+def _watch_stubs(mock_client) -> None:
+    mock_client.conversations_info.return_value = {"channel": {"id": "C123", "name": "general"}}
+    mock_client.users_list.return_value = {
+        "members": [
+            {
+                "id": "U1",
+                "name": "alice",
+                "profile": {"display_name_normalized": "alice", "real_name": "Alice"},
+            }
+        ],
+        "response_metadata": {"next_cursor": ""},
+    }
+
+
+def _hist(messages: list) -> dict:
+    return {
+        "messages": messages,
+        "has_more": False,
+        "response_metadata": {"next_cursor": ""},
+    }
+
+
+def test_watch_messages_yields_in_ts_order(mock_client, monkeypatch):
+    monkeypatch.setattr("ssd.api.time.sleep", lambda _s: None)
+    _watch_stubs(mock_client)
+    mock_client.conversations_history.return_value = _hist(
+        [
+            {"ts": "2.0", "user": "U1", "text": "second", "reply_count": 0},
+            {"ts": "1.0", "user": "U1", "text": "first", "reply_count": 0},
+        ]
+    )
+    api = SlackAPI("xoxd-fake", delay=0)
+    got = list(islice(api.watch_messages("C123", oldest="0.5", interval=0), 2))
+    assert [m["text"] for m in got] == ["first", "second"]
+    assert got[0]["user_name"] == "alice"
+
+
+def test_watch_messages_skips_inclusive_oldest(mock_client, monkeypatch):
+    monkeypatch.setattr("ssd.api.time.sleep", lambda _s: None)
+    _watch_stubs(mock_client)
+    mock_client.conversations_history.side_effect = [
+        _hist([{"ts": "1.0", "user": "U1", "text": "old", "reply_count": 0}]),
+        _hist(
+            [
+                {"ts": "1.0", "user": "U1", "text": "old", "reply_count": 0},
+                {"ts": "2.0", "user": "U1", "text": "new", "reply_count": 0},
+            ]
+        ),
+    ]
+    api = SlackAPI("xoxd-fake", delay=0)
+    got = list(islice(api.watch_messages("C123", oldest="0", interval=0), 2))
+    assert [m["text"] for m in got] == ["old", "new"]
+    assert mock_client.conversations_history.call_count == 2
+
+
+def test_watch_messages_default_oldest_is_now(mock_client, monkeypatch):
+    monkeypatch.setattr("ssd.api.time.time", lambda: 1717200000.0)
+
+    def boom(_s: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("ssd.api.time.sleep", boom)
+    _watch_stubs(mock_client)
+    mock_client.conversations_history.return_value = _hist([])
+    api = SlackAPI("xoxd-fake", delay=0)
+    with pytest.raises(KeyboardInterrupt):
+        list(api.watch_messages("C123"))
+    assert mock_client.conversations_history.call_args.kwargs["oldest"] == "1717200000.0"
+
+
+def test_watch_messages_interval_at_least_five_seconds(mock_client, monkeypatch):
+    waited: list[float] = []
+
+    def boom(seconds: float) -> None:
+        waited.append(seconds)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("ssd.api.time.sleep", boom)
+    _watch_stubs(mock_client)
+    mock_client.conversations_history.return_value = _hist([])
+    api = SlackAPI("xoxd-fake", delay=1.0)
+    with pytest.raises(KeyboardInterrupt):
+        list(api.watch_messages("C123", oldest="0"))
+    assert waited == [5.0]
+
+
+def test_watch_messages_prefetches_users(mock_client, monkeypatch):
+    monkeypatch.setattr("ssd.api.time.sleep", lambda _s: None)
+    _watch_stubs(mock_client)
+    mock_client.conversations_history.return_value = _hist(
+        [{"ts": "1.0", "user": "U1", "text": "hi", "reply_count": 0}]
+    )
+    api = SlackAPI("xoxd-fake", delay=0)
+    list(islice(api.watch_messages("C123", oldest="0", interval=0), 1))
+    mock_client.users_list.assert_called()
+    mock_client.users_info.assert_not_called()
+
+
+def test_watch_messages_thread_polls_replies(mock_client, monkeypatch):
+    monkeypatch.setattr("ssd.api.time.sleep", lambda _s: None)
+    _watch_stubs(mock_client)
+    mock_client.conversations_replies.return_value = _hist(
+        [
+            {"ts": "1.0", "user": "U1", "text": "root"},
+            {"ts": "1.1", "user": "U1", "text": "reply"},
+        ]
+    )
+    api = SlackAPI("xoxd-fake", delay=0)
+    got = list(islice(api.watch_messages("C123", thread_ts="1.0", oldest="1.0", interval=0), 1))
+    assert [m["text"] for m in got] == ["reply"]
+    mock_client.conversations_history.assert_not_called()
+    assert mock_client.conversations_replies.call_args.kwargs["ts"] == "1.0"

@@ -135,10 +135,15 @@ def _make_api(
     return api, workspace, token, attach
 
 
+def _should_confirm() -> bool:
+    return sys.stdin.isatty()
+
+
 @main.command()
 @click.argument("targets", nargs=-1, required=False)
 @click.option("--all", "dump_all", is_flag=True, help="Dump every visible conversation")
 @click.option("--dms", "dump_dms", is_flag=True, help="Dump DMs and MPIMs")
+@click.option("--yes", is_flag=True, help="Skip confirmation prompts")
 @click.option("--delay", default=None, type=float, help="Override global --delay")
 @click.pass_context
 def dump(
@@ -146,6 +151,7 @@ def dump(
     targets: tuple[str, ...],
     dump_all: bool,
     dump_dms: bool,
+    yes: bool,
     delay: float | None,
 ) -> None:
     """Full history dump of channel(s)."""
@@ -158,12 +164,26 @@ def dump(
         if dump_dms and not dump_all:
             convos = [c for c in convos if c.get("is_im") or c.get("is_mpim")]
         targets = tuple(str(c["id"]) for c in convos)
+        if dump_all and not yes and _should_confirm():
+            click.confirm(f"Dump {len(targets)} conversations?", abort=True)
         click.echo(f"Dumping {len(targets)} conversations...")
     elif not targets:
         raise click.UsageError("Provide channel targets, --all, or --dms")
-    for target in targets:
-        click.echo(f"Dumping {target}...")
-        run_dump(api, workspace, target, ctx.obj["output"], token=token, attachments_enabled=attach)
+    n = len(targets)
+    for i, target in enumerate(targets, 1):
+        if n > 1:
+            click.echo(f"Dumping {i}/{n} {target}...")
+        else:
+            click.echo(f"Dumping {target}...")
+        run_dump(
+            api,
+            workspace,
+            target,
+            ctx.obj["output"],
+            token=token,
+            attachments_enabled=attach,
+            refresh_workspace=(i == 1),
+        )
 
 
 @main.command()
@@ -188,6 +208,59 @@ def sync(
             token=token,
             attachments_enabled=attach,
         )
+
+
+@main.command()
+@click.argument("target")
+@click.option("--oldest", default=None, help="Unix ts; default is now (no replay)")
+@click.option(
+    "--interval",
+    default=None,
+    type=float,
+    help="Seconds between polls (default: max(5, --delay))",
+)
+@click.option("--delay", default=None, type=float, help="Override global --delay")
+@click.option("--json", "as_json", is_flag=True, help="JSON object per line (default when piped)")
+@click.option("--from-cursor", "from_cursor", is_flag=True, help="Start from dump .cursor")
+@click.pass_context
+def watch(
+    ctx: click.Context,
+    target: str,
+    oldest: str | None,
+    interval: float | None,
+    delay: float | None,
+    as_json: bool,
+    from_cursor: bool,
+) -> None:
+    """Poll a channel, DM, or thread for new messages."""
+    from ssd.parser import parse_target
+
+    delay = delay if delay is not None else ctx.obj.get("delay", 1.0)
+    api, workspace, _token, _attach = _make_api(ctx.obj, delay)
+    parsed = parse_target(target)
+    ident = parsed.channel_id or parsed.channel_name
+    if not ident:
+        raise click.UsageError("Provide a channel id, #name, or Slack URL")
+    if from_cursor and oldest is not None:
+        raise click.UsageError("Use --from-cursor or --oldest, not both")
+    if from_cursor:
+        from ssd.output import channel_dir, read_cursor
+
+        cid, name = api.resolve_channel(ident)
+        ident = cid
+        dump_dir = channel_dir(str(ctx.obj["output"]), workspace, name, cid)
+        if parsed.thread_ts:
+            dump_dir = dump_dir / f"thread_{parsed.thread_ts.replace('.', '_')}"
+        oldest = read_cursor(dump_dir)
+        if oldest is None:
+            raise click.UsageError(f"No .cursor in {dump_dir}; dump or sync first")
+    try:
+        for msg in api.watch_messages(
+            ident, oldest=oldest, interval=interval, thread_ts=parsed.thread_ts
+        ):
+            _print_watch_line(msg, as_json)
+    except KeyboardInterrupt:
+        return
 
 
 @main.command()
@@ -314,12 +387,18 @@ def update(ctx: click.Context, delay: float | None) -> None:
 @main.command()
 @click.argument("channel_dirs", nargs=-1, type=click.Path(exists=True, file_okay=False))
 @click.option("--output", default="graph.html", show_default=True, help="Output HTML file path")
+@click.option("--open/--no-open", "open_browser", default=None, help="Open HTML in a browser")
 @click.pass_context
-def graph(ctx: click.Context, channel_dirs: tuple[str, ...], output: str) -> None:
+def graph(
+    ctx: click.Context,
+    channel_dirs: tuple[str, ...],
+    output: str,
+    open_browser: bool | None,
+) -> None:
     """Generate an interactive communication graph from dumped channels.
 
     Without arguments, uses all channel directories under the output dir.
-    Opens the resulting HTML file in a browser.
+    Opens the HTML in a browser on a TTY unless --no-open.
     """
     from ssd.graph import build_graph, render_html
 
@@ -338,12 +417,27 @@ def graph(ctx: click.Context, channel_dirs: tuple[str, ...], output: str) -> Non
 
     html = render_html(data)
     Path(output).write_text(html, encoding="utf-8")
-    click.echo(f"Graph: {output} — {len(data['nodes'])} users, {len(data['links'])} connections")
-    webbrowser.open(f"file://{str(Path(output).resolve())}")
+    click.echo(f"Graph: {output}: {len(data['nodes'])} users, {len(data['links'])} connections")
+    if open_browser is None:
+        open_browser = sys.stdout.isatty()
+    if open_browser:
+        webbrowser.open(f"file://{str(Path(output).resolve())}")
 
 
 def _json_pretty() -> bool:
     return sys.stdout.isatty()
+
+
+def _print_watch_line(msg: dict[str, Any], as_json: bool) -> None:
+    if as_json or not _json_pretty():
+        import json
+
+        click.echo(json.dumps(msg, ensure_ascii=False))
+        return
+    user = msg.get("user_name") or msg.get("username") or msg.get("user") or ""
+    ts = msg.get("ts") or ""
+    text = " ".join(str(msg.get("text") or "").split())
+    click.echo(f"{user}  {ts}  {text}")
 
 
 def _print_json(data: Any) -> None:
@@ -364,6 +458,396 @@ def _print_json(data: Any) -> None:
         raise SystemExit(1)
 
 
+def _want_table(ctx: click.Context) -> bool:
+    return _json_pretty() and not ctx.obj.get("query_json")
+
+
+def _cell(val: Any, width: int) -> str:
+    text = " ".join(str(val or "").split())
+    if len(text) > width:
+        text = text[: width - 3] + "..."
+    return text.ljust(width)
+
+
+def _print_table(rows: list[dict[str, str]], headers: tuple[str, ...]) -> None:
+    widths = {h: len(h) for h in headers}
+    for row in rows:
+        for key in headers:
+            cap = (
+                48
+                if key in {"text", "real_name", "name", "title", "handle", "url", "comment"}
+                else 24
+            )
+            widths[key] = max(widths[key], min(len(row.get(key) or ""), cap))
+    click.echo("  ".join(_cell(h, widths[h]) for h in headers).rstrip())
+    for row in rows:
+        click.echo("  ".join(_cell(row.get(h) or "", widths[h]) for h in headers).rstrip())
+
+
+def _print_list(
+    ctx: click.Context,
+    data: dict[str, Any],
+    key: str,
+    headers: tuple[str, ...],
+    row_fn: Any,
+) -> None:
+    if not _want_table(ctx):
+        _print_json(data)
+        return
+    rows: list[dict[str, str]] = []
+    for item in data.get(key) or []:
+        if isinstance(item, dict):
+            rows.append(row_fn(item))
+    _print_table(rows, headers)
+    if data.get("ok") is False:
+        ctx.exit(1)
+
+
+def _channel_cell(item: dict[str, Any], fallback: str = "") -> str:
+    ch = item.get("channel")
+    if isinstance(ch, dict):
+        return str(ch.get("name") or ch.get("id") or fallback)
+    if ch:
+        return str(ch)
+    return str(item.get("channel_id") or fallback)
+
+
+def _print_search(ctx: click.Context, data: dict[str, Any]) -> None:
+    if not _want_table(ctx):
+        _print_json(data)
+        return
+    rows: list[dict[str, str]] = []
+    messages = data.get("messages") or {}
+    for item in messages.get("matches") or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "channel": _channel_cell(item),
+                "user": str(
+                    item.get("username") or item.get("user_name") or item.get("user") or ""
+                ),
+                "ts": str(item.get("ts") or ""),
+                "text": str(item.get("text") or ""),
+            }
+        )
+    files = data.get("files") or {}
+    for item in files.get("matches") or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "channel": _channel_cell(item),
+                "user": str(item.get("user") or ""),
+                "ts": str(item.get("timestamp") or item.get("created") or item.get("ts") or ""),
+                "text": str(item.get("name") or item.get("title") or ""),
+            }
+        )
+    _print_table(rows, ("channel", "user", "ts", "text"))
+    if data.get("ok") is False:
+        ctx.exit(1)
+
+
+def _print_history(ctx: click.Context, data: dict[str, Any], channel: str) -> None:
+    if not _want_table(ctx):
+        _print_json(data)
+        return
+    rows: list[dict[str, str]] = []
+    for item in data.get("messages") or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "channel": _channel_cell(item, channel),
+                "user": str(
+                    item.get("user_name") or item.get("username") or item.get("user") or ""
+                ),
+                "ts": str(item.get("ts") or ""),
+                "text": str(item.get("text") or ""),
+            }
+        )
+    _print_table(rows, ("channel", "user", "ts", "text"))
+    if data.get("ok") is False:
+        ctx.exit(1)
+
+
+def _print_members(
+    ctx: click.Context, client: Any, data: dict[str, Any], key: str = "members"
+) -> None:
+    if not _want_table(ctx):
+        _print_json(data)
+        return
+    names: dict[str, str] = {}
+    for user in client.users_list().get("members") or []:
+        if isinstance(user, dict) and user.get("id"):
+            names[str(user["id"])] = str(user.get("name") or user.get("real_name") or "")
+    rows: list[dict[str, str]] = []
+    for uid in data.get(key) or []:
+        sid = (
+            str(uid)
+            if not isinstance(uid, dict)
+            else str(uid.get("id") or uid.get("slack_id") or "")
+        )
+        rows.append({"id": sid, "name": names.get(sid, "")})
+    _print_table(rows, ("id", "name"))
+    if data.get("ok") is False:
+        ctx.exit(1)
+
+
+def _print_threads(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(
+        ctx,
+        data,
+        "threads",
+        ("channel", "thread_ts", "replies"),
+        lambda t: {
+            "channel": _channel_cell(t),
+            "thread_ts": str(t.get("thread_ts") or ""),
+            "replies": str(t.get("reply_count") if t.get("reply_count") is not None else ""),
+        },
+    )
+
+
+def _channel_row(ch: dict[str, Any]) -> dict[str, str]:
+    return {
+        "id": str(ch.get("id") or ""),
+        "name": str(ch.get("name") or ""),
+        "private": "yes" if ch.get("is_private") else "",
+    }
+
+
+def _user_row(user: dict[str, Any]) -> dict[str, str]:
+    profile = user.get("profile") if isinstance(user.get("profile"), dict) else {}
+    return {
+        "id": str(user.get("id") or ""),
+        "name": str(user.get("name") or ""),
+        "real_name": str(user.get("real_name") or profile.get("real_name") or ""),
+    }
+
+
+def _file_row(file: dict[str, Any]) -> dict[str, str]:
+    return {
+        "id": str(file.get("id") or ""),
+        "name": str(file.get("name") or file.get("title") or ""),
+        "user": str(file.get("user") or ""),
+    }
+
+
+def _item_row(item: dict[str, Any]) -> dict[str, str]:
+    msg = item.get("message") if isinstance(item.get("message"), dict) else {}
+    return {
+        "channel": _channel_cell(item),
+        "user": str(
+            msg.get("user_name") or msg.get("username") or msg.get("user") or item.get("user") or ""
+        ),
+        "ts": str(msg.get("ts") or item.get("ts") or ""),
+        "text": str(msg.get("text") or item.get("text") or item.get("type") or ""),
+    }
+
+
+def _reaction_row(item: dict[str, Any]) -> dict[str, str]:
+    msg = item.get("message") if isinstance(item.get("message"), dict) else {}
+    return {
+        "channel": _channel_cell(item),
+        "user": str(item.get("user") or ""),
+        "reaction": str(item.get("reaction") or ""),
+        "text": str(msg.get("text") or ""),
+    }
+
+
+def _print_channels(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(ctx, data, "channels", ("id", "name", "private"), _channel_row)
+
+
+def _print_users(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(ctx, data, "members", ("id", "name", "real_name"), _user_row)
+
+
+def _print_files(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(ctx, data, "files", ("id", "name", "user"), _file_row)
+
+
+def _print_items(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(ctx, data, "items", ("channel", "user", "ts", "text"), _item_row)
+
+
+def _print_emoji(ctx: click.Context, data: dict[str, Any]) -> None:
+    if not _want_table(ctx):
+        _print_json(data)
+        return
+    raw = data.get("emoji") or {}
+    rows: list[dict[str, str]] = []
+    if isinstance(raw, dict):
+        for name, url in raw.items():
+            rows.append({"name": str(name), "url": str(url)})
+    else:
+        for item in raw:
+            if isinstance(item, dict):
+                rows.append(
+                    {"name": str(item.get("name") or ""), "url": str(item.get("url") or "")}
+                )
+    _print_table(rows, ("name", "url"))
+    if data.get("ok") is False:
+        ctx.exit(1)
+
+
+def _print_bookmarks(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(
+        ctx,
+        data,
+        "bookmarks",
+        ("id", "title", "channel"),
+        lambda b: {
+            "id": str(b.get("id") or ""),
+            "title": str(b.get("title") or ""),
+            "channel": str(b.get("channel_id") or b.get("channel") or ""),
+        },
+    )
+
+
+def _print_usergroups(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(
+        ctx,
+        data,
+        "usergroups",
+        ("id", "handle", "name"),
+        lambda g: {
+            "id": str(g.get("id") or ""),
+            "handle": str(g.get("handle") or ""),
+            "name": str(g.get("name") or ""),
+        },
+    )
+
+
+def _print_bots(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(
+        ctx,
+        data,
+        "bots",
+        ("id", "name"),
+        lambda b: {"id": str(b.get("id") or ""), "name": str(b.get("name") or "")},
+    )
+
+
+def _print_reactions(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(ctx, data, "items", ("channel", "user", "reaction", "text"), _reaction_row)
+
+
+def _print_scheduled(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(
+        ctx,
+        data,
+        "scheduled_messages",
+        ("id", "channel", "text"),
+        lambda m: {
+            "id": str(m.get("id") or ""),
+            "channel": _channel_cell(m),
+            "text": str(m.get("text") or ""),
+        },
+    )
+
+
+def _print_reminders(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(
+        ctx,
+        data,
+        "reminders",
+        ("id", "text"),
+        lambda r: {"id": str(r.get("id") or ""), "text": str(r.get("text") or "")},
+    )
+
+
+def _print_comments(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(
+        ctx,
+        data,
+        "comments",
+        ("id", "user", "comment"),
+        lambda c: {
+            "id": str(c.get("id") or ""),
+            "user": str(c.get("user") or ""),
+            "comment": str(c.get("comment") or c.get("text") or ""),
+        },
+    )
+
+
+def _print_calls(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(
+        ctx,
+        data,
+        "calls",
+        ("id", "name"),
+        lambda c: {"id": str(c.get("id") or ""), "name": str(c.get("name") or "")},
+    )
+
+
+def _print_logins(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(
+        ctx,
+        data,
+        "logins",
+        ("user_id", "ip"),
+        lambda r: {"user_id": str(r.get("user_id") or ""), "ip": str(r.get("ip") or "")},
+    )
+
+
+def _print_logs(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(
+        ctx,
+        data,
+        "logs",
+        ("user_id", "service_id"),
+        lambda r: {
+            "user_id": str(r.get("user_id") or ""),
+            "service_id": str(r.get("service_id") or ""),
+        },
+    )
+
+
+def _print_cursors(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(
+        ctx,
+        data,
+        "cursors",
+        ("channel", "ts"),
+        lambda r: {"channel": str(r.get("channel") or ""), "ts": str(r.get("ts") or "")},
+    )
+
+
+def _print_teams(ctx: click.Context, data: dict[str, Any]) -> None:
+    _print_list(
+        ctx,
+        data,
+        "teams",
+        ("id", "name"),
+        lambda t: {"id": str(t.get("id") or ""), "name": str(t.get("name") or "")},
+    )
+
+
+def _print_presence(ctx: click.Context, data: dict[str, Any]) -> None:
+    if not _want_table(ctx):
+        _print_json(data)
+        return
+    raw = data.get("users")
+    rows: list[dict[str, str]] = []
+    if isinstance(raw, dict):
+        for uid, val in raw.items():
+            presence = val.get("presence") if isinstance(val, dict) else val
+            rows.append({"user": str(uid), "presence": str(presence or "")})
+    else:
+        for item in raw or []:
+            if isinstance(item, dict):
+                rows.append(
+                    {
+                        "user": str(item.get("user_id") or item.get("user") or ""),
+                        "presence": str(item.get("presence") or ""),
+                    }
+                )
+    _print_table(rows, ("user", "presence"))
+    if data.get("ok") is False:
+        ctx.exit(1)
+
+
 def _client(ctx: click.Context) -> Any:
     from ssd.dumpapi import DumpClient
 
@@ -371,21 +855,111 @@ def _client(ctx: click.Context) -> Any:
     try:
         client = DumpClient(path)
     except FileNotFoundError as exc:
-        raise click.UsageError(
-            f"No dump at {path}. Run ssd dump, or pass --output."
-        ) from exc
+        raise click.UsageError(f"No dump at {path}. Run ssd dump, or pass --output.") from exc
     if not client._channels:
         click.echo(
-            f"No channels under {path}. Dump first, or point --output at a "
-            "workspace or export.",
+            f"No channels under {path}. Dump first, or point --output at a workspace or export.",
             err=True,
         )
     return client
 
 
-@main.group("query")
-def query_cmd() -> None:
+_QUERY_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "Messages",
+        (
+            "search",
+            "history",
+            "message",
+            "replies",
+            "threads",
+            "cursor",
+            "export",
+            "reactions",
+            "pins",
+            "stars",
+            "scheduled",
+            "permalink",
+        ),
+    ),
+    (
+        "People",
+        (
+            "users",
+            "profile",
+            "identity",
+            "email",
+            "presence",
+            "dnd",
+            "usergroups",
+            "usergroup-users",
+        ),
+    ),
+    ("Channels", ("channels", "members", "convos", "bookmarks")),
+    ("Files", ("files", "files-info", "remote-files", "comments", "emoji")),
+    (
+        "Team",
+        (
+            "team",
+            "teams",
+            "team-profile",
+            "prefs",
+            "external-teams",
+            "auth",
+            "access-logs",
+            "billable",
+            "integration-logs",
+            "bots",
+            "rtm",
+        ),
+    ),
+    ("Extras", ("stats", "calls", "participants", "reminders")),
+    ("Raw", ("api", "migration")),
+)
+
+
+class QueryGroup(click.Group):
+    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        listed: set[str] = set()
+        extras_rows: list[tuple[str, str]] = []
+        sections: list[tuple[str, list[tuple[str, str]]]] = []
+        for title, names in _QUERY_SECTIONS:
+            rows: list[tuple[str, str]] = []
+            for name in names:
+                cmd = self.get_command(ctx, name)
+                if cmd is None or cmd.hidden:
+                    continue
+                listed.add(name)
+                rows.append((name, cmd.get_short_help_str(limit=88)))
+            if title == "Extras":
+                extras_rows = rows
+            elif rows:
+                sections.append((title, rows))
+        for name in self.list_commands(ctx):
+            if name in listed:
+                continue
+            cmd = self.get_command(ctx, name)
+            if cmd is None or cmd.hidden:
+                continue
+            extras_rows.append((name, cmd.get_short_help_str(limit=88)))
+        extras_at = next(
+            (i for i, (title, _) in enumerate(sections) if title == "Raw"),
+            len(sections),
+        )
+        if extras_rows:
+            sections.insert(extras_at, ("Extras", extras_rows))
+        for title, rows in sections:
+            with formatter.section(title):
+                formatter.write_dl(rows)
+
+
+@main.group("query", cls=QueryGroup)
+@click.option("--json", "query_json", is_flag=True, help="Print JSON even on a TTY")
+@click.pass_context
+def query_cmd(ctx: click.Context, query_json: bool) -> None:
     """Read local dump data. No Slack network."""
+    ctx.ensure_object(dict)
+    ctx.obj["query_json"] = query_json
 
 
 @query_cmd.command("stats", help="Channel and message counts")
@@ -400,13 +974,10 @@ def query_stats(ctx: click.Context) -> None:
 @click.option("--page", default=None, type=int)
 @click.option("--sort-dir", default="desc")
 @click.pass_context
-def query_search(
-    ctx: click.Context, q: str, count: int, page: int | None, sort_dir: str
-) -> None:
-    _print_json(
-        _client(ctx).search_all(
-            query=q, count=count, page=page, sort_dir=sort_dir
-        )
+def query_search(ctx: click.Context, q: str, count: int, page: int | None, sort_dir: str) -> None:
+    _print_search(
+        ctx,
+        _client(ctx).search_all(query=q, count=count, page=page, sort_dir=sort_dir),
     )
 
 
@@ -439,9 +1010,9 @@ def query_history(
         "cursor": cursor,
     }
     if search:
-        _print_json(client.conversations_history_search(query=search, **kwargs))
+        _print_history(ctx, client.conversations_history_search(query=search, **kwargs), channel)
         return
-    _print_json(client.conversations_history(**kwargs))
+    _print_history(ctx, client.conversations_history(**kwargs), channel)
 
 
 @query_cmd.command("cursor", help="Sync cursor ts; omit channel to list all")
@@ -471,9 +1042,9 @@ def query_cursor(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.cursors_search(**kwargs))
+        _print_cursors(ctx, client.cursors_search(**kwargs))
         return
-    _print_json(client.cursors_list(count=count, page=page, cursor=cursor))
+    _print_cursors(ctx, client.cursors_list(count=count, page=page, cursor=cursor))
 
 
 @query_cmd.command("channels", help="conversations.list / info; --search filters")
@@ -507,14 +1078,14 @@ def query_channels(
             kwargs["limit"] = limit
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.conversations_search(**kwargs))
+        _print_channels(ctx, client.conversations_search(**kwargs))
         return
     kwargs = {"exclude_archived": exclude_archived, "types": types}
     if limit is not None:
         kwargs["limit"] = limit
     if cursor is not None:
         kwargs["cursor"] = cursor
-    _print_json(client.conversations_list(**kwargs))
+    _print_channels(ctx, client.conversations_list(**kwargs))
 
 
 @query_cmd.command("users", help="users.list / info; --search filters")
@@ -546,7 +1117,7 @@ def query_users(
             kwargs["limit"] = limit
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.users_search(**kwargs))
+        _print_users(ctx, client.users_search(**kwargs))
         return
     kwargs = {
         "include_message_users": message_users,
@@ -557,7 +1128,7 @@ def query_users(
         kwargs["limit"] = limit
     if cursor is not None:
         kwargs["cursor"] = cursor
-    _print_json(client.users_list(**kwargs))
+    _print_users(ctx, client.users_list(**kwargs))
 
 
 @query_cmd.command("files", help="files.list / info; --search filters")
@@ -603,9 +1174,9 @@ def query_files(
     if cursor is not None:
         kwargs["cursor"] = cursor
     if search:
-        _print_json(client.files_list_search(query=search, **kwargs))
+        _print_files(ctx, client.files_list_search(query=search, **kwargs))
         return
-    _print_json(client.files_list(**kwargs))
+    _print_files(ctx, client.files_list(**kwargs))
 
 
 @query_cmd.command("remote-files", help="files.remote.list / info; --search filters")
@@ -632,12 +1203,12 @@ def query_remote_files(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.files_remote_search(**kwargs))
+        _print_files(ctx, client.files_remote_search(**kwargs))
         return
     if file_id:
         _print_json(client.files_remote_info(file=file_id))
         return
-    _print_json(client.files_remote_list(count=count, page=page, cursor=cursor))
+    _print_files(ctx, client.files_remote_list(count=count, page=page, cursor=cursor))
 
 
 @query_cmd.command("message", help="One message by channel and ts")
@@ -664,12 +1235,12 @@ def query_export(ctx: click.Context, dest: str, channel: str | None) -> None:
 def query_emoji(ctx: click.Context, name: str | None, search: str | None) -> None:
     client = _client(ctx)
     if search:
-        _print_json(client.emoji_search(query=search))
+        _print_emoji(ctx, client.emoji_search(query=search))
         return
     if name:
         _print_json(client.emoji_get(name=name))
         return
-    _print_json(client.emoji_list())
+    _print_emoji(ctx, client.emoji_list())
 
 
 @query_cmd.command("identity", help="users.identity from auth.json")
@@ -706,9 +1277,9 @@ def query_teams(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.auth_teams_search(**kwargs))
+        _print_teams(ctx, client.auth_teams_search(**kwargs))
         return
-    _print_json(client.auth_teams_list(count=count, page=page, cursor=cursor))
+    _print_teams(ctx, client.auth_teams_list(count=count, page=page, cursor=cursor))
 
 
 @query_cmd.command("rtm", help="rtm.connect snapshot; --start for rtm.start")
@@ -766,11 +1337,9 @@ def query_external_teams(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.team_externalTeams_search(**kwargs))
+        _print_teams(ctx, client.team_externalTeams_search(**kwargs))
         return
-    _print_json(
-        client.team_externalTeams_list(count=count, page=page, cursor=cursor)
-    )
+    _print_teams(ctx, client.team_externalTeams_list(count=count, page=page, cursor=cursor))
 
 
 @query_cmd.command("profile", help="users.profile.get")
@@ -809,11 +1378,9 @@ def query_pins(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.pins_search(**kwargs))
+        _print_items(ctx, client.pins_search(**kwargs))
         return
-    _print_json(
-        client.pins_list(channel=channel, count=count, page=page, cursor=cursor)
-    )
+    _print_items(ctx, client.pins_list(channel=channel, count=count, page=page, cursor=cursor))
 
 
 @query_cmd.command("scheduled", help="chat.scheduledMessages; --search filters")
@@ -849,12 +1416,13 @@ def query_scheduled(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.chat_scheduledMessages_search(**kwargs))
+        _print_scheduled(ctx, client.chat_scheduledMessages_search(**kwargs))
         return
-    _print_json(
+    _print_scheduled(
+        ctx,
         client.chat_scheduledMessages_list(
             channel=channel, oldest=oldest, latest=latest, count=count, page=page, cursor=cursor
-        )
+        ),
     )
 
 
@@ -887,11 +1455,9 @@ def query_threads(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.threads_search(**kwargs))
+        _print_threads(ctx, client.threads_search(**kwargs))
         return
-    _print_json(
-        client.threads_list(channel=channel, count=count, page=page, cursor=cursor)
-    )
+    _print_threads(ctx, client.threads_list(channel=channel, count=count, page=page, cursor=cursor))
 
 
 @query_cmd.command("replies", help="conversations.replies; --search filters")
@@ -928,9 +1494,9 @@ def query_replies(
     if cursor is not None:
         kwargs["cursor"] = cursor
     if search:
-        _print_json(client.conversations_replies_search(query=search, **kwargs))
+        _print_history(ctx, client.conversations_replies_search(query=search, **kwargs), channel)
         return
-    _print_json(client.conversations_replies(**kwargs))
+    _print_history(ctx, client.conversations_replies(**kwargs), channel)
 
 
 @query_cmd.command("stars", help="stars.list / info; --search filters")
@@ -964,12 +1530,11 @@ def query_stars(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.stars_search(**kwargs))
+        _print_items(ctx, client.stars_search(**kwargs))
         return
-    _print_json(
-        client.stars_list(
-            channel=channel_opt or channel, count=count, page=page, cursor=cursor
-        )
+    _print_items(
+        ctx,
+        client.stars_list(channel=channel_opt or channel, count=count, page=page, cursor=cursor),
     )
 
 
@@ -1008,12 +1573,13 @@ def query_reminders(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.reminders_search(**kwargs))
+        _print_reminders(ctx, client.reminders_search(**kwargs))
         return
-    _print_json(
+    _print_reminders(
+        ctx,
         client.reminders_list(
             include_complete=complete, user=user, count=count, page=page, cursor=cursor
-        )
+        ),
     )
 
 
@@ -1050,9 +1616,10 @@ def query_usergroups(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.usergroups_search(**kwargs))
+        _print_usergroups(ctx, client.usergroups_search(**kwargs))
         return
-    _print_json(
+    _print_usergroups(
+        ctx,
         client.usergroups_list(
             include_disabled=include_disabled,
             include_count=include_count,
@@ -1060,7 +1627,7 @@ def query_usergroups(
             count=count,
             page=page,
             cursor=cursor,
-        )
+        ),
     )
 
 
@@ -1074,10 +1641,10 @@ def query_presence(
 ) -> None:
     client = _client(ctx)
     if search:
-        _print_json(client.presence_search(query=search))
+        _print_presence(ctx, client.presence_search(query=search))
         return
     if all_users:
-        _print_json({"ok": True, "users": list(client.iter_presence())})
+        _print_presence(ctx, {"ok": True, "users": list(client.iter_presence())})
         return
     _print_json(client.users_getPresence(user=user))
 
@@ -1115,12 +1682,13 @@ def query_access_logs(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.team_accessLogs_search(**kwargs))
+        _print_logins(ctx, client.team_accessLogs_search(**kwargs))
         return
-    _print_json(
+    _print_logins(
+        ctx,
         client.team_accessLogs(
             user=user, after=after, before=before, count=count, page=page, cursor=cursor
-        )
+        ),
     )
 
 
@@ -1154,12 +1722,12 @@ def query_bots(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.bots_search(**kwargs))
+        _print_bots(ctx, client.bots_search(**kwargs))
         return
     if bot:
         _print_json(client.bots_info(bot=bot))
         return
-    _print_json(client.bots_list(count=count, page=page, cursor=cursor))
+    _print_bots(ctx, client.bots_list(count=count, page=page, cursor=cursor))
 
 
 @query_cmd.command("members", help="conversations.members; --search filters")
@@ -1182,9 +1750,9 @@ def query_members(
     if cursor is not None:
         kwargs["cursor"] = cursor
     if search:
-        _print_json(client.conversations_members_search(query=search, **kwargs))
+        _print_members(ctx, client, client.conversations_members_search(query=search, **kwargs))
         return
-    _print_json(client.conversations_members(**kwargs))
+    _print_members(ctx, client, client.conversations_members(**kwargs))
 
 
 @query_cmd.command("convos", help="users.conversations; --search filters")
@@ -1215,9 +1783,9 @@ def query_convos(
     if cursor is not None:
         kwargs["cursor"] = cursor
     if search:
-        _print_json(client.users_conversations_search(query=search, **kwargs))
+        _print_channels(ctx, client.users_conversations_search(query=search, **kwargs))
         return
-    _print_json(client.users_conversations(**kwargs))
+    _print_channels(ctx, client.users_conversations(**kwargs))
 
 
 @query_cmd.command("reactions", help="reactions.get / list; --search filters")
@@ -1251,10 +1819,11 @@ def query_reactions(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.reactions_search(**kwargs))
+        _print_reactions(ctx, client.reactions_search(**kwargs))
         return
-    _print_json(
-        client.reactions_list(channel=channel, user=user, count=count, page=page, cursor=cursor)
+    _print_reactions(
+        ctx,
+        client.reactions_list(channel=channel, user=user, count=count, page=page, cursor=cursor),
     )
 
 
@@ -1263,9 +1832,7 @@ def query_reactions(
 @click.option("--search", default=None)
 @click.option("--users", default=None, help="Comma-separated user ids for dnd.teamInfo")
 @click.pass_context
-def query_dnd(
-    ctx: click.Context, user: str | None, search: str | None, users: str | None
-) -> None:
+def query_dnd(ctx: click.Context, user: str | None, search: str | None, users: str | None) -> None:
     client = _client(ctx)
     if search:
         _print_json(client.dnd_search(query=search, users=users or user))
@@ -1300,11 +1867,9 @@ def query_comments(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.files_comments_search(**kwargs))
+        _print_comments(ctx, client.files_comments_search(**kwargs))
         return
-    _print_json(
-        client.files_comments(file=file_id, count=count, page=page, cursor=cursor)
-    )
+    _print_comments(ctx, client.files_comments(file=file_id, count=count, page=page, cursor=cursor))
 
 
 @query_cmd.command("email", help="users.lookupByEmail")
@@ -1341,9 +1906,9 @@ def query_usergroup_users(
     if cursor is not None:
         kwargs["cursor"] = cursor
     if search:
-        _print_json(client.usergroups_users_search(query=search, **kwargs))
+        _print_members(ctx, client, client.usergroups_users_search(query=search, **kwargs), "users")
         return
-    _print_json(client.usergroups_users(**kwargs))
+    _print_members(ctx, client, client.usergroups_users(**kwargs), "users")
 
 
 @query_cmd.command("calls", help="calls.list / info; --search filters")
@@ -1370,12 +1935,12 @@ def query_calls(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.calls_search(**kwargs))
+        _print_calls(ctx, client.calls_search(**kwargs))
         return
     if call_id:
         _print_json(client.calls_info(id=call_id))
         return
-    _print_json(client.calls_list(count=count, page=page, cursor=cursor))
+    _print_calls(ctx, client.calls_list(count=count, page=page, cursor=cursor))
 
 
 @query_cmd.command("participants", help="calls.participants; --search filters")
@@ -1385,9 +1950,11 @@ def query_calls(
 def query_participants(ctx: click.Context, call_id: str, search: str | None) -> None:
     client = _client(ctx)
     if search:
-        _print_json(client.calls_participants_search(id=call_id, query=search))
+        _print_members(
+            ctx, client, client.calls_participants_search(id=call_id, query=search), "participants"
+        )
         return
-    _print_json(client.calls_participants(id=call_id))
+    _print_members(ctx, client, client.calls_participants(id=call_id), "participants")
 
 
 @query_cmd.command("billable", help="team.billableInfo; --search filters")
@@ -1435,9 +2002,10 @@ def query_integration_logs(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.team_integrationLogs_search(**kwargs))
+        _print_logs(ctx, client.team_integrationLogs_search(**kwargs))
         return
-    _print_json(
+    _print_logs(
+        ctx,
         client.team_integrationLogs(
             user=user,
             change_type=change_type,
@@ -1445,7 +2013,7 @@ def query_integration_logs(
             count=count,
             page=page,
             cursor=cursor,
-        )
+        ),
     )
 
 
@@ -1476,10 +2044,10 @@ def query_bookmarks(
             kwargs["page"] = page
         if cursor is not None:
             kwargs["cursor"] = cursor
-        _print_json(client.bookmarks_search(**kwargs))
+        _print_bookmarks(ctx, client.bookmarks_search(**kwargs))
         return
-    _print_json(
-        client.bookmarks_list(channel=channel, count=count, page=page, cursor=cursor)
+    _print_bookmarks(
+        ctx, client.bookmarks_list(channel=channel, count=count, page=page, cursor=cursor)
     )
 
 
@@ -1488,9 +2056,7 @@ def query_bookmarks(
 @click.argument("ts")
 @click.pass_context
 def query_permalink(ctx: click.Context, channel: str, ts: str) -> None:
-    _print_json(
-        _client(ctx).chat_getPermalink(channel=channel, message_ts=ts)
-    )
+    _print_json(_client(ctx).chat_getPermalink(channel=channel, message_ts=ts))
 
 
 @query_cmd.command("api", help="Call a DumpClient method by Slack name (key=value)")

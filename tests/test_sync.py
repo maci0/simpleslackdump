@@ -27,6 +27,16 @@ def mock_api():
     return api
 
 
+def test_sync_keeps_existing_workspace_sidecar(tmp_path, mock_api):
+    ws = tmp_path / "testteam"
+    ws.mkdir()
+    (ws / "stars.json").write_text('[{"type":"message","channel":"OLD"}]', encoding="utf-8")
+    run_sync(mock_api, "testteam", "C123", str(tmp_path), since=None)
+    stars = json.loads((ws / "stars.json").read_text())
+    assert stars[0]["channel"] == "OLD"
+    mock_api.get_stars.assert_not_called()
+
+
 def test_sync_reads_cursor_and_passes_oldest(tmp_path, mock_api):
     out_dir = channel_dir(str(tmp_path), "testteam", "general", "C123")
     out_dir.mkdir(parents=True)
@@ -80,6 +90,16 @@ def test_sync_updates_cursor(tmp_path, mock_api):
 def test_sync_no_cursor_fetches_all(tmp_path, mock_api):
     run_sync(mock_api, "testteam", "C123", str(tmp_path), since=None)
     mock_api.get_messages.assert_called_once_with("C123", oldest=None)
+
+
+def test_sync_prefetches_users_before_enrich(tmp_path, mock_api):
+    order: list[str] = []
+    users_ret = mock_api.fetch_workspace_users.return_value
+    mock_api.fetch_workspace_users.side_effect = lambda: order.append("users") or users_ret
+    enrich_ret = mock_api.enrich.return_value
+    mock_api.enrich.side_effect = lambda *a, **k: order.append("enrich") or enrich_ret
+    run_sync(mock_api, "testteam", "C123", str(tmp_path), since=None)
+    assert order.index("users") < order.index("enrich")
 
 
 def test_refresh_old_threads_picks_up_new_replies(tmp_path, mock_api):

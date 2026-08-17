@@ -19,7 +19,35 @@ from ssd.output import (
 from ssd.parser import parse_target
 
 
-def _write_sidecars(api: SlackAPI, out_dir: Path, channel_id: str) -> None:
+def _prefetch_users(api: SlackAPI) -> None:
+    try:
+        api.fetch_workspace_users()
+    except Exception as exc:
+        click.echo(f"  workspace users skipped: {exc}", err=True)
+
+
+def _write_sidecars(
+    api: SlackAPI,
+    out_dir: Path,
+    channel_id: str,
+    *,
+    refresh_workspace: bool = False,
+) -> None:
+    ws = out_dir.parent
+
+    def write_ws(name: str, fetch: Any, label: str) -> None:
+        path = ws / name
+        if path.exists() and not refresh_workspace:
+            return
+        try:
+            payload = fetch()
+            if name == "users.json":
+                write_users(ws, payload)
+            else:
+                write_json(ws, name, payload)
+        except Exception as exc:
+            click.echo(f"  {label} skipped: {exc}", err=True)
+
     try:
         write_json(out_dir, "channel.json", api.get_channel_info(channel_id))
     except Exception as exc:
@@ -28,24 +56,9 @@ def _write_sidecars(api: SlackAPI, out_dir: Path, channel_id: str) -> None:
         write_json(out_dir, "members.json", api.get_channel_members(channel_id))
     except Exception as exc:
         click.echo(f"  members skipped: {exc}", err=True)
-    emoji_path = out_dir.parent / "emoji.json"
-    if not emoji_path.exists():
-        try:
-            write_json(out_dir.parent, "emoji.json", api.get_emoji())
-        except Exception as exc:
-            click.echo(f"  emoji skipped: {exc}", err=True)
-    cats_path = out_dir.parent / "emoji_categories.json"
-    if not cats_path.exists():
-        try:
-            write_json(out_dir.parent, "emoji_categories.json", api.get_emoji_categories())
-        except Exception as exc:
-            click.echo(f"  emoji categories skipped: {exc}", err=True)
-    auth_path = out_dir.parent / "auth.json"
-    if not auth_path.exists():
-        try:
-            write_json(out_dir.parent, "auth.json", api.get_auth())
-        except Exception as exc:
-            click.echo(f"  auth skipped: {exc}", err=True)
+    write_ws("emoji.json", api.get_emoji, "emoji")
+    write_ws("emoji_categories.json", api.get_emoji_categories, "emoji categories")
+    write_ws("auth.json", api.get_auth, "auth")
     try:
         write_json(out_dir, "bookmarks.json", api.get_bookmarks(channel_id))
     except Exception as exc:
@@ -54,119 +67,51 @@ def _write_sidecars(api: SlackAPI, out_dir: Path, channel_id: str) -> None:
         write_json(out_dir, "pins.json", api.get_pins(channel_id))
     except Exception as exc:
         click.echo(f"  pins skipped: {exc}", err=True)
-    groups_path = out_dir.parent / "usergroups.json"
-    if not groups_path.exists():
+    write_ws("usergroups.json", api.get_usergroups, "usergroups")
+    write_ws("users.json", api.fetch_workspace_users, "workspace users")
+    write_ws("conversations.json", api.list_conversations, "conversations")
+    write_ws("stars.json", api.get_stars, "stars")
+    write_ws("reminders.json", api.get_reminders, "reminders")
+    write_ws("dnd.json", api.get_dnd, "dnd")
+    write_ws("team_profile.json", api.get_team_profile, "team profile")
+    write_ws("scheduled_messages.json", api.get_scheduled_messages, "scheduled messages")
+    write_ws("team.json", api.get_team_info, "team info")
+    files_path = ws / "files.json"
+    canvases_path = ws / "canvases.json"
+    need_files = refresh_workspace or not files_path.exists()
+    need_canvas = refresh_workspace or not canvases_path.exists()
+    if need_files or need_canvas:
         try:
-            write_json(out_dir.parent, "usergroups.json", api.get_usergroups())
-        except Exception as exc:
-            click.echo(f"  usergroups skipped: {exc}", err=True)
-    users_path = out_dir.parent / "users.json"
-    if not users_path.exists():
-        try:
-            write_users(out_dir.parent, api.fetch_workspace_users())
-        except Exception as exc:
-            click.echo(f"  workspace users skipped: {exc}", err=True)
-    conv_path = out_dir.parent / "conversations.json"
-    if not conv_path.exists():
-        try:
-            write_json(out_dir.parent, "conversations.json", api.list_conversations())
-        except Exception as exc:
-            click.echo(f"  conversations skipped: {exc}", err=True)
-    stars_path = out_dir.parent / "stars.json"
-    if not stars_path.exists():
-        try:
-            write_json(out_dir.parent, "stars.json", api.get_stars())
-        except Exception as exc:
-            click.echo(f"  stars skipped: {exc}", err=True)
-    reminders_path = out_dir.parent / "reminders.json"
-    if not reminders_path.exists():
-        try:
-            write_json(out_dir.parent, "reminders.json", api.get_reminders())
-        except Exception as exc:
-            click.echo(f"  reminders skipped: {exc}", err=True)
-    dnd_path = out_dir.parent / "dnd.json"
-    if not dnd_path.exists():
-        try:
-            write_json(out_dir.parent, "dnd.json", api.get_dnd())
-        except Exception as exc:
-            click.echo(f"  dnd skipped: {exc}", err=True)
-    team_profile_path = out_dir.parent / "team_profile.json"
-    if not team_profile_path.exists():
-        try:
-            write_json(out_dir.parent, "team_profile.json", api.get_team_profile())
-        except Exception as exc:
-            click.echo(f"  team profile skipped: {exc}", err=True)
-    scheduled_path = out_dir.parent / "scheduled_messages.json"
-    if not scheduled_path.exists():
-        try:
-            write_json(out_dir.parent, "scheduled_messages.json", api.get_scheduled_messages())
-        except Exception as exc:
-            click.echo(f"  scheduled messages skipped: {exc}", err=True)
-    team_path = out_dir.parent / "team.json"
-    if not team_path.exists():
-        try:
-            write_json(out_dir.parent, "team.json", api.get_team_info())
-        except Exception as exc:
-            click.echo(f"  team info skipped: {exc}", err=True)
-    files_path = out_dir.parent / "files.json"
-    if not files_path.exists():
-        try:
-            write_json(out_dir.parent, "files.json", api.get_files())
+            listed = _attach_comments(api, list(api.get_files()))
+            if need_files:
+                write_json(ws, "files.json", listed)
+            if need_canvas:
+                canvases = [
+                    f
+                    for f in listed
+                    if isinstance(f, dict) and str(f.get("filetype") or "").lower() == "canvas"
+                ]
+                write_json(ws, "canvases.json", canvases)
         except Exception as exc:
             click.echo(f"  files list skipped: {exc}", err=True)
-    remote_path = out_dir.parent / "remote_files.json"
-    if not remote_path.exists():
-        try:
-            write_json(out_dir.parent, "remote_files.json", api.get_remote_files())
-        except Exception as exc:
-            click.echo(f"  remote files skipped: {exc}", err=True)
-    presence_path = out_dir.parent / "presence.json"
-    if not presence_path.exists():
-        try:
-            uid = (api.get_auth() or {}).get("user_id") or ""
-            info = api.get_presence(uid or None)
-            write_json(out_dir.parent, "presence.json", {uid: info} if uid else {})
-        except Exception as exc:
-            click.echo(f"  presence skipped: {exc}", err=True)
-    billable_path = out_dir.parent / "billable_info.json"
-    if not billable_path.exists():
-        try:
-            write_json(out_dir.parent, "billable_info.json", api.get_billable_info())
-        except Exception as exc:
-            click.echo(f"  billable info skipped: {exc}", err=True)
-    logs_path = out_dir.parent / "integration_logs.json"
-    if not logs_path.exists():
-        try:
-            write_json(out_dir.parent, "integration_logs.json", api.get_integration_logs())
-        except Exception as exc:
-            click.echo(f"  integration logs skipped: {exc}", err=True)
-    access_path = out_dir.parent / "access_logs.json"
-    if not access_path.exists():
-        try:
-            write_json(out_dir.parent, "access_logs.json", api.get_access_logs())
-        except Exception as exc:
-            click.echo(f"  access logs skipped: {exc}", err=True)
-    prefs_path = out_dir.parent / "team_preferences.json"
-    if not prefs_path.exists():
-        try:
-            write_json(out_dir.parent, "team_preferences.json", api.get_team_preferences())
-        except Exception as exc:
-            click.echo(f"  team preferences skipped: {exc}", err=True)
-    ext_path = out_dir.parent / "external_teams.json"
-    if not ext_path.exists():
-        try:
-            write_json(out_dir.parent, "external_teams.json", api.get_external_teams())
-        except Exception as exc:
-            click.echo(f"  external teams skipped: {exc}", err=True)
-    teams_path = out_dir.parent / "teams.json"
-    if not teams_path.exists():
-        try:
-            write_json(out_dir.parent, "teams.json", api.get_auth_teams())
-        except Exception as exc:
-            click.echo(f"  auth teams skipped: {exc}", err=True)
+    write_ws("remote_files.json", api.get_remote_files, "remote files")
+    try:
+        _merge_presence(api, ws, channel_id)
+    except Exception as exc:
+        click.echo(f"  presence skipped: {exc}", err=True)
+    write_ws("billable_info.json", api.get_billable_info, "billable info")
+    write_ws("integration_logs.json", api.get_integration_logs, "integration logs")
+    write_ws("access_logs.json", api.get_access_logs, "access logs")
+    write_ws("team_preferences.json", api.get_team_preferences, "team preferences")
+    write_ws("external_teams.json", api.get_external_teams, "external teams")
+    write_ws("teams.json", api.get_auth_teams, "auth teams")
 
 
-def write_channel_stats(out_dir: Path, messages: list[dict[str, Any]] | None = None) -> None:
+def write_channel_stats(
+    out_dir: Path,
+    messages: list[dict[str, Any]] | None = None,
+    api: SlackAPI | None = None,
+) -> None:
     if messages is None:
         path = out_dir / "messages.json"
         if not path.is_file():
@@ -187,7 +132,10 @@ def write_channel_stats(out_dir: Path, messages: list[dict[str, Any]] | None = N
         {"messages": len(messages), "replies": n_replies, "files": n_files},
     )
     write_json(out_dir, "reactions.json", _reaction_rows(out_dir, messages))
-    write_json(out_dir, "files.json", _file_rows(messages))
+    files = _file_rows(messages)
+    if api is not None:
+        _attach_comments(api, files)
+    write_json(out_dir, "files.json", files)
     write_json(out_dir, "calls.json", _call_rows(messages))
     write_json(out_dir, "threads.json", _thread_rows(out_dir, messages))
     merge_workspace_bots(out_dir.parent, messages)
@@ -264,6 +212,82 @@ def _file_rows(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             seen.add(fid)
             files.append(fobj)
     return files
+
+
+def _api_delay(api: SlackAPI) -> float:
+    delay = getattr(api, "delay", 0)
+    if isinstance(delay, (int, float)) and delay > 0:
+        return float(delay)
+    return 0.0
+
+
+def _attach_comments(api: SlackAPI, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    delay = _api_delay(api)
+    first = True
+    for fobj in files:
+        if not isinstance(fobj, dict):
+            continue
+        try:
+            count = int(fobj.get("comments_count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count <= 0 or fobj.get("comments"):
+            continue
+        fid = fobj.get("id")
+        if not fid:
+            continue
+        if first:
+            first = False
+        elif delay:
+            time.sleep(delay)
+        try:
+            info = api.get_file_info(str(fid)) or {}
+        except Exception:
+            continue
+        if not isinstance(info, dict):
+            continue
+        comments = info.get("comments")
+        if comments:
+            fobj["comments"] = comments
+        if info.get("comments_count") is not None:
+            fobj["comments_count"] = info["comments_count"]
+    return files
+
+
+def _merge_presence(api: SlackAPI, ws_dir: Path, channel_id: str) -> None:
+    path = ws_dir / "presence.json"
+    existing: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            raw = {}
+        if isinstance(raw, dict):
+            existing = raw
+    uids: set[str] = set()
+    try:
+        for uid in api.get_channel_members(channel_id) or []:
+            if uid:
+                uids.add(str(uid))
+    except Exception:
+        pass
+    try:
+        auth_uid = (api.get_auth() or {}).get("user_id") or ""
+        if auth_uid:
+            uids.add(str(auth_uid))
+    except Exception:
+        pass
+    delay = _api_delay(api)
+    first = True
+    for uid in sorted(uids):
+        if uid in existing:
+            continue
+        if first:
+            first = False
+        elif delay:
+            time.sleep(delay)
+        existing[uid] = api.get_presence(uid)
+    write_json(ws_dir, "presence.json", existing)
 
 
 def _call_rows(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -366,6 +390,7 @@ def run_dump(
     output_root: str,
     token: str | None = None,
     attachments_enabled: bool = False,
+    refresh_workspace: bool = True,
 ) -> None:
     parsed = parse_target(target)
 
@@ -375,7 +400,9 @@ def run_dump(
         out_dir = channel_dir(output_root, workspace, channel_name, channel_id)
         thread_dir = out_dir / f"thread_{parsed.thread_ts.replace('.', '_')}"
         t0 = time.monotonic()
-        raw_replies = api.get_replies(channel_id, parsed.thread_ts)
+        raw_replies = api.get_replies(channel_id, parsed.thread_ts, include_parent=True)
+        if raw_replies:
+            _prefetch_users(api)
         enriched = [api.enrich_reply(r, channel_id=channel_id) for r in raw_replies]
         if attachments_enabled and token:
             from ssd.attachments import download_attachments
@@ -397,7 +424,7 @@ def run_dump(
         if enriched:
             write_cursor(thread_dir, max(m["ts"] for m in enriched))
         write_users(thread_dir, api.get_user_profiles())
-        _write_sidecars(api, out_dir, channel_id)
+        _write_sidecars(api, out_dir, channel_id, refresh_workspace=refresh_workspace)
         elapsed = time.monotonic() - t0
         click.echo(
             f"  thread {parsed.thread_ts}: {len(enriched)} replies"
@@ -421,6 +448,8 @@ def run_dump(
         f" ({len(raw_msgs) / max(fetch_elapsed, 0.1):.0f} msg/s)"
     )
 
+    if raw_msgs:
+        _prefetch_users(api)
     enriched = api.enrich(channel_id, raw_msgs)
     thread_count = sum(1 for m in enriched if m.get("thread"))
     reply_count = sum(len(m.get("thread", [])) for m in enriched)
@@ -433,11 +462,11 @@ def run_dump(
         enriched = download_attachments(out_dir, enriched, token)
 
     write_messages(out_dir, enriched)
-    write_channel_stats(out_dir, enriched)
+    write_channel_stats(out_dir, enriched, api=api)
     if enriched:
         write_cursor(out_dir, max(m["ts"] for m in enriched))
     write_users(out_dir, api.get_user_profiles())
-    _write_sidecars(api, out_dir, channel_id)
+    _write_sidecars(api, out_dir, channel_id, refresh_workspace=refresh_workspace)
 
     total_elapsed = time.monotonic() - t0
     click.echo(

@@ -64,6 +64,9 @@ ssd dump "#general" "#random" C0XXXXXXXXX
 # Every conversation the token can see (channels, groups, DMs, MPIMs)
 ssd dump --all
 
+# Skip the TTY confirm for --all
+ssd dump --all --yes
+
 # Direct messages and MPIMs only
 ssd dump --dms
 ```
@@ -79,14 +82,14 @@ members.json      # roster
 pins.json bookmarks.json reactions.json files.json calls.json threads.json stats.json
 ```
 
-Workspace sidecars land next to the channel dirs. Written once per workspace, reused by `ssd query`:
+Workspace sidecars land next to the channel dirs. `ssd dump` refreshes them; `ssd sync` only writes missing files. `ssd query` reads them:
 
 ```
 auth.json users.json conversations.json emoji.json emoji_categories.json
 usergroups.json stars.json reminders.json dnd.json team.json team_profile.json
 team_preferences.json scheduled_messages.json files.json remote_files.json
 presence.json billable_info.json integration_logs.json access_logs.json
-external_teams.json teams.json bots.json
+external_teams.json teams.json bots.json canvases.json
 ```
 
 Progress output:
@@ -116,6 +119,35 @@ ssd sync "#general" "#random"
 `--since` acts as a floor: messages older than this date are never re-fetched, but the cursor still advances normally as new messages arrive. If both a cursor and `--since` are set, the later of the two is used.
 
 New messages merge into existing `messages.json`: no duplicates, no overwrites. New replies to older messages are also picked up (each known thread is polled for replies newer than the last stored reply). Note: `ssd sync` on a channel also polls all known threads for new replies, which may make syncs slower on channels with many active threads.
+
+## Watch a channel or DM
+
+Polls `conversations.history` (same call as dump/sync), or `conversations.replies` for a thread URL. No websocket. Slack's RTM API is legacy and needs a classic app token; Events API / Socket Mode need a Slack app (`xapp`). This tool uses the desktop `xoxc` session, so polling is the fit.
+
+Default: start from now (no replay) and wait at least 5 seconds between polls so empty checks stay under history rate limits. `--from-cursor` starts from the dump `.cursor` instead (dump or sync first). On a TTY, one compact line per message. Piped or `--json`: one JSON object per line. Ctrl-C stops.
+
+```bash
+ssd watch C0XXXXXXXXX
+ssd watch "#general"
+ssd watch "https://yourworkspace.slack.com/archives/D0YYYYYYYYY"
+ssd watch "https://yourworkspace.slack.com/archives/C0XXXXXXXXX/p1234567890123456"
+ssd watch C0XXXXXXXXX --oldest 1717200000 --interval 10
+ssd watch C0XXXXXXXXX --from-cursor
+ssd watch C0XXXXXXXXX --json
+```
+
+```python
+from ssd.api import SlackAPI
+
+api = SlackAPI(token, cookie=cookie)
+for msg in api.watch_messages("C0XXXXXXXXX"):
+    print(msg["text"])
+
+for reply in api.watch_messages("C0XXXXXXXXX", thread_ts="1234567890.123456"):
+    print(reply["text"])
+```
+
+Channel watch does not poll old threads for new replies. Pass `thread_ts` (or a thread URL on the CLI) to poll that thread only. Does not write a dump; use `ssd sync` for that.
 
 ## Track channels with ssd.toml
 
@@ -198,7 +230,7 @@ Paste a thread URL to dump only that thread's replies:
 ssd dump "https://yourworkspace.slack.com/archives/C0XXXXXXXXX/p1234567890123456"
 ```
 
-Output in `<channel_dir>/thread_1234567890_123456/thread.json` and `thread.md`. Note the thread timestamp uses underscores in the directory name (`1234567890.123456` becomes `thread_1234567890_123456/`). `ssd sync` on a thread URL fetches only new replies and merges them.
+Output in `<channel_dir>/thread_1234567890_123456/thread.json` and `thread.md`. Note the thread timestamp uses underscores in the directory name (`1234567890.123456` becomes `thread_1234567890_123456/`). The parent message is stored when Slack returns it. `ssd sync` on a thread URL fetches only new replies and merges them.
 
 ## Query local dumps
 
@@ -218,7 +250,7 @@ ssd query api conversations.history channel=C0XXXXXXXXX
 
 A positional id looks up one object. `--search TERM` filters the list. Info wins if both are present. `ssd query --help` lists every subcommand.
 
-On a TTY, query prints indented JSON. Pipes stay one line. A Slack-shaped `{"ok": false}` payload still prints, then exits 1. A missing `--output` path is a usage error. An empty dump prints JSON and a stderr hint.
+On a TTY, list commands print a table (`search`, `history`, `replies`, `threads`, `users`, `files`, `remote-files`, `channels`, `convos`, `members`, `pins`, `stars`, `emoji`, `bookmarks`, `usergroups`, `bots`, `reactions`, `scheduled`, `reminders`, `comments`, `calls`, `access-logs`, `integration-logs`, `cursor`, `teams`, `external-teams`, `presence --all`, `usergroup-users`, `participants`). Info lookups stay JSON. Pipes stay compact JSON. `ssd query --json search hello` forces JSON on a TTY. A Slack-shaped `{"ok": false}` payload still prints, then exits 1. A missing `--output` path is a usage error. An empty dump prints JSON and a stderr hint.
 
 | Group | Commands |
 |---|---|
@@ -261,6 +293,8 @@ Generate an HTML graph showing who talks to whom across one or more channel dump
 ssd graph output/myworkspace/general_C0XXXXXXXXX
 ssd graph output/myworkspace/general_C0XXXXXXXXX output/myworkspace/engineering_C0YYYYYYYYY
 ssd graph output/myworkspace/general_C0XXXXXXXXX --output graph.html
+ssd graph --no-open
+ssd graph --open
 
 # Auto-discover all channel dirs under the output directory
 ssd graph
@@ -268,9 +302,9 @@ ssd graph
 
 Without arguments, discovers all channel directories under `--output` (default: `./output`).
 
-Opens in the browser. Nodes are users; edges represent message replies and mentions. Useful for mapping active communication patterns across a workspace.
+On a TTY, opens the HTML in a browser unless `--no-open`. Nodes are users; edges represent message replies and mentions.
 
-Note: edges (connections between users) are derived from channel message threads and @mentions. Standalone thread dumps (`thread_*/thread.json`) contribute to user activity counts. Reply-to-author edges are not recorded (the original thread author is not stored in the thread file), but `@mentions` found in those replies do create edges.
+Note: edges come from channel message threads, `@name` mentions, and `<@U...>` in `text_raw`. Standalone thread dumps (`thread_*/thread.json`) count toward user activity. If the dump stored the parent message, reply-to-author edges are recorded.
 
 ## All options
 
@@ -290,6 +324,7 @@ Commands:
   token     Extract credentials from Slack desktop app and browser
   dump      Full history dump of one or more channels/threads (`--all`, `--dms`)
   sync      Incremental sync: fetch only new messages since last run
+  watch     Poll a channel, DM, or thread; TTY lines or JSONL when piped / `--json`
   add       Add a channel or thread to ssd.toml
   remove    Remove a channel or thread from ssd.toml
   list      Show tracked channels and last sync time
@@ -314,6 +349,7 @@ Re-run `ssd token` if commands return `invalid_auth` (e.g. after signing out and
 
 - **macOS only** for `ssd token` / live dump. Token and cookie extraction reads macOS-specific paths (`~/Library/Application Support/Slack/`, Chrome, and Firefox profile dirs). `ssd query` and `DumpClient` run anywhere you have a dump.
 - **DumpClient is read-only.** No chat.postMessage, no reactions.add, no websocket. `rtm.connect` / `rtm.start` return snapshot dicts from sidecars.
+- **`ssd watch` polls.** No RTM/Events/Socket Mode. Those need a Slack app token, not the desktop session this tool uses.
 
 ## Troubleshooting
 

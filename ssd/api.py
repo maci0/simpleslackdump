@@ -1,5 +1,7 @@
+import contextlib
 import re
 import time
+from collections.abc import Iterator
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -9,6 +11,7 @@ from slack_sdk import WebClient
 _ID_RE = re.compile(r"^[CDG][A-Z0-9a-z]+$")
 _MENTION_RE = re.compile(r"<@([A-Z0-9a-z]+)>")
 _ALL_CONV_TYPES = "public_channel,private_channel,mpim,im"
+_WATCH_MIN_INTERVAL = 5.0
 _PASSTHROUGH = (
     "subtype",
     "bot_id",
@@ -294,18 +297,10 @@ class SlackAPI:
         if _ID_RE.match(name_or_id):
             info = self.client.conversations_info(channel=name_or_id)["channel"]
             return info["id"], info["name"]
-        # search by name
-        cursor = None
-        while True:
-            resp = self.client.conversations_list(
-                limit=200, cursor=cursor, types="public_channel,private_channel"
-            )
-            for ch in resp["channels"]:
-                if ch["name"] == name_or_id.lstrip("#"):
-                    return ch["id"], ch["name"]
-            cursor = resp.get("response_metadata", {}).get("next_cursor")
-            if not cursor:
-                break
+        want = name_or_id.lstrip("#")
+        for ch in self.list_conversations():
+            if str(ch.get("name") or "") == want:
+                return str(ch["id"]), str(ch.get("name") or "")
         raise ValueError(f"Channel not found: {name_or_id}")
 
     def _paginate(
@@ -364,14 +359,60 @@ class SlackAPI:
             oldest=oldest,
         )
 
+    def watch_messages(
+        self,
+        channel: str,
+        *,
+        oldest: str | None = None,
+        interval: float | None = None,
+        thread_ts: str | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield new messages by polling conversations.history, or
+        conversations.replies when ``thread_ts`` is set.
+
+        Default ``oldest`` is now, so history is not replayed. Default interval
+        is at least 5s (or ``delay`` if larger) to stay under history rate limits.
+        Inclusive ``oldest`` hits are skipped. Channel watch does not poll old
+        threads for new replies (one API call per interval).
+        """
+        channel_id, _name = self.resolve_channel(channel)
+        cursor = oldest if oldest is not None else str(time.time())
+        wait = (
+            max(_WATCH_MIN_INTERVAL, float(self.delay or 0))
+            if interval is None
+            else float(interval)
+        )
+        with contextlib.suppress(Exception):
+            self.fetch_workspace_users()
+        while True:
+            if thread_ts:
+                raw = self.get_replies(channel_id, thread_ts, oldest=cursor, include_parent=True)
+            else:
+                raw = self.get_messages(channel_id, oldest=cursor)
+            new = [m for m in raw if m.get("ts") and float(m["ts"]) > float(cursor)]
+            new.sort(key=lambda m: float(m["ts"]))
+            if new:
+                if thread_ts:
+                    yield from (self.enrich_reply(r, channel_id=channel_id) for r in new)
+                else:
+                    yield from self.enrich(channel_id, new)
+                cursor = str(new[-1]["ts"])
+            time.sleep(wait)
+
     def get_replies(
-        self, channel_id: str, thread_ts: str, oldest: str | None = None
+        self,
+        channel_id: str,
+        thread_ts: str,
+        oldest: str | None = None,
+        include_parent: bool = False,
     ) -> list[dict[str, Any]]:
         raw = self._paginate(
             self.client.conversations_replies,
             {"channel": channel_id, "ts": thread_ts, "limit": 200, "include_all_metadata": True},
             oldest=oldest,
         )
+        if include_parent:
+            return raw
         return [m for m in raw if m.get("ts") != thread_ts]
 
     def resolve_mentions(self, text: str) -> str:
@@ -514,9 +555,12 @@ class SlackAPI:
 
     def get_usergroups(self) -> list[dict[str, Any]]:
         if self._usergroups is None:
-            raw = self.client.usergroups_list(
-                include_users=True, include_count=True, include_disabled=True
-            ).get("usergroups") or []
+            raw = (
+                self.client.usergroups_list(
+                    include_users=True, include_count=True, include_disabled=True
+                ).get("usergroups")
+                or []
+            )
             self._usergroups = list(raw)
         return self._usergroups
 
@@ -608,9 +652,7 @@ class SlackAPI:
             items: list[dict[str, Any]] = []
             page = 1
             while True:
-                resp = self.client.files_list(
-                    count=100, page=page, show_files_hidden_by_limit=True
-                )
+                resp = self.client.files_list(count=100, page=page, show_files_hidden_by_limit=True)
                 items.extend(resp.get("files") or [])
                 paging = resp.get("paging") or {}
                 pages = int(paging.get("pages") or 1)
@@ -620,6 +662,14 @@ class SlackAPI:
                 time.sleep(self.delay)
             self._files_list = items
         return self._files_list
+
+    def get_file_info(self, file_id: str) -> dict[str, Any]:
+        raw = dict(self.client.files_info(file=file_id))
+        file_obj = dict(raw.get("file") or {})
+        comments = raw.get("comments")
+        if comments is not None:
+            file_obj["comments"] = comments
+        return file_obj
 
     def get_remote_files(self) -> list[dict[str, Any]]:
         if self._remote_files is None:
@@ -724,11 +774,13 @@ class SlackAPI:
         """Enrich a single reply dict — name resolution and mention substitution only,
         no recursive thread fetch (replies don't have sub-threads)."""
         user_id = r.get("user", "")
+        raw_text = r.get("text") or ""
         out = {
             "ts": r["ts"],
             "user": user_id,
             "user_name": self.get_user_name(user_id) if user_id else "unknown",
-            "text": self.resolve_mentions(r.get("text", "")),
+            "text": self.resolve_mentions(raw_text),
+            "text_raw": raw_text,
             "reactions": [
                 {"name": rx["name"], "count": rx["count"], "users": rx.get("users", [])}
                 for rx in r.get("reactions", [])

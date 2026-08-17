@@ -50,13 +50,13 @@ Gaps vs live Slack:
 - write methods are not implemented
 - ``rtm.connect`` / ``rtm.start`` return snapshot dicts; no websocket
 - not full Slack search syntax (no ranking)
-- without ``conversations.json``, a C-prefix id is both public and private
-- dumped text already has ``<@U...>`` replaced with ``@display_name``
-- standalone thread dumps may omit the parent message
+- without ``channel.json`` or ``conversations.json``, a C-prefix id is treated as public
+- dumped ``text`` has ``<@U...>`` resolved to ``@display_name``; ``text_raw`` keeps the original
+- standalone thread dumps include the parent when Slack returned it
 - ``conversations.members`` prefers ``members.json``; else IM ``user`` plus
   auth user; else people who posted, replied, or reacted
 - ``files.comments`` reads comments stored on dumped file objects
-- presence dump is the authenticated user unless ``presence.json`` has more
+- ``presence.json`` is channel members plus the authenticated user
 """
 
 import inspect
@@ -1425,7 +1425,7 @@ def _is_remote_file(f: dict[str, Any]) -> bool:
 
 
 def _doc_text(msg: dict[str, Any]) -> str:
-    parts = [msg.get("text") or ""]
+    parts = [msg.get("text") or "", msg.get("text_raw") or ""]
     for f in msg.get("files") or []:
         parts.append(str(f.get("name") or ""))
         parts.append(str(f.get("title") or ""))
@@ -2162,6 +2162,7 @@ class DumpClient:
         self._ws_files_loaded = True
         self._ingest_file_rows(self._first_json("files.json"))
         self._ingest_file_rows(self._first_json("remote_files.json"))
+        self._ingest_file_rows(self._first_json("canvases.json"))
         if self._files:
             self._files_complete = True
             return
@@ -2390,10 +2391,25 @@ class DumpClient:
             if ts in by_ts:
                 continue
             raw = _read_json(tpath) if tpath.is_file() else []
-            replies = raw if isinstance(raw, list) else []
-            thread_only[ts] = replies
+            replies = [m for m in (raw if isinstance(raw, list) else []) if isinstance(m, dict)]
+            parent = None
+            rest: list[dict[str, Any]] = []
             for reply in replies:
-                index(reply, ts)
+                if parent is None and str(reply.get("ts") or "") == ts:
+                    parent = reply
+                else:
+                    rest.append(reply)
+            if parent is not None:
+                parent = {**parent, "thread": rest}
+                messages.append(parent)
+                by_ts[ts] = parent
+                index(parent, None)
+                for reply in rest:
+                    index(reply, ts)
+            else:
+                thread_only[ts] = rest
+                for reply in rest:
+                    index(reply, ts)
         member_ids = sorted(members)
         members_path = ch.path / "members.json"
         if members_path.is_file():
@@ -2498,14 +2514,25 @@ class DumpClient:
         users = dict(self._ensure_profiles())
         if not extras:
             return users
-        self._load_all()
         for ch in self._channels.values():
-            loaded = ch.loaded
-            if loaded is None:
-                continue
-            for uid, profile in loaded.users_extra.items():
-                if uid not in users:
-                    users[uid] = profile
+            raw = self._channel_sidecar(ch, "members.json")
+            ids: list[str] = []
+            if isinstance(raw, list):
+                ids = [str(x) for x in raw if x]
+            else:
+                meta = {**(self._catalog.get(ch.id) or {}), **self._channel_meta(ch)}
+                other = str(meta.get("user") or "")
+                if other:
+                    ids = [other]
+                elif ch.path.is_dir():
+                    loaded = self._load(ch)
+                    for uid, profile in loaded.users_extra.items():
+                        if uid not in users:
+                            users[uid] = profile
+                    continue
+            for uid in ids:
+                if uid and uid not in users:
+                    users[uid] = {"id": uid, "handle": uid, "display_name": uid}
         self._users_merged = users
         return users
 

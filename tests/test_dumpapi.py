@@ -251,6 +251,60 @@ def test_conversations_replies_standalone_thread(dump_root: Path) -> None:
     assert resp["messages"][0]["text"] == "standalone reply"
 
 
+def test_standalone_thread_parent_in_history(tmp_path: Path) -> None:
+    ch = tmp_path / "acme" / "general_C123"
+    _write(ch / "messages.json", [])
+    _write(
+        ch / "thread_1_0" / "thread.json",
+        [
+            {
+                "ts": "1.0",
+                "user": "U1",
+                "user_name": "alice",
+                "text": "root",
+                "thread_ts": "1.0",
+                "reactions": [],
+                "files": [],
+            },
+            {
+                "ts": "1.1",
+                "user": "U2",
+                "user_name": "bob",
+                "text": "reply",
+                "thread_ts": "1.0",
+                "reactions": [],
+                "files": [],
+            },
+        ],
+    )
+    client = DumpClient(tmp_path)
+    hist = client.conversations_history(channel="C123")
+    assert [m["text"] for m in hist["messages"]] == ["root"]
+    replies = client.conversations_replies(channel="C123", ts="1.0")
+    assert [m["text"] for m in replies["messages"]] == ["root", "reply"]
+
+
+def test_search_matches_text_raw(tmp_path: Path) -> None:
+    _write(
+        (tmp_path / "acme" / "general_C123") / "messages.json",
+        [
+            {
+                "ts": "1.0",
+                "user": "U1",
+                "user_name": "alice",
+                "text": "hi @zoe",
+                "text_raw": "hi <@U99>",
+                "reactions": [],
+                "files": [],
+                "thread": [],
+            }
+        ],
+    )
+    client = DumpClient(tmp_path)
+    hits = client.search_messages(query="U99")["messages"]["matches"]
+    assert [m["text"] for m in hits] == ["hi @zoe"]
+
+
 def test_conversations_replies_not_found(dump_root: Path) -> None:
     client = DumpClient(dump_root)
     resp = client.conversations_replies(channel="C123", ts="99.0")
@@ -1625,6 +1679,24 @@ def test_search_is_channel_and_private(tmp_path: Path) -> None:
         m["text"] for m in client.search_messages(query="is:public ping")["messages"]["matches"]
     }
     assert public_hits == {"chan ping"}
+
+
+def test_search_is_private_from_channel_json(tmp_path: Path) -> None:
+    ch = tmp_path / "acme" / "secret_C999"
+    _write(ch / "messages.json", [_msg("1.0", "secret ping")])
+    _write(
+        ch / "channel.json",
+        {"id": "C999", "name": "secret", "is_private": True, "is_channel": True},
+    )
+    client = DumpClient(tmp_path)
+    private_hits = {
+        m["text"] for m in client.search_messages(query="is:private ping")["messages"]["matches"]
+    }
+    public_hits = {
+        m["text"] for m in client.search_messages(query="is:public ping")["messages"]["matches"]
+    }
+    assert private_hits == {"secret ping"}
+    assert public_hits == set()
 
 
 def test_im_info_and_groups_info_alias(dump_root: Path) -> None:
@@ -5064,3 +5136,39 @@ def test_iter_threads_prefers_threads_json(tmp_path: Path) -> None:
     assert [t["thread_ts"] for t in hits] == ["9.0"]
     empty = client.threads_search(query="")
     assert empty["ok"] is False
+
+
+def test_users_list_extras_from_members_without_load_all(tmp_path: Path, mocker) -> None:
+    ch = tmp_path / "acme" / "general_C123"
+    extra = _msg("1.0", "from message user")
+    extra["user"] = "U3"
+    extra["user_name"] = "carol"
+    _write(ch / "messages.json", [extra])
+    _write(
+        ch / "users.json",
+        {"U1": {"id": "U1", "handle": "alice", "display_name": "alice", "is_bot": False}},
+    )
+    _write(ch / "members.json", ["U1", "U99"])
+    _write(
+        tmp_path / "acme" / "conversations.json",
+        [{"id": "D1", "name": "im-bob", "is_im": True, "user": "U88"}],
+    )
+    client = DumpClient(tmp_path)
+    spy = mocker.spy(client, "_load_all")
+    ids = {u["id"] for u in client.users_list(include_message_users=True)["members"]}
+    spy.assert_not_called()
+    assert "U1" in ids
+    assert "U99" in ids
+    assert "U88" in ids
+    assert "U3" not in ids
+
+
+def test_files_list_includes_canvases_sidecar(tmp_path: Path) -> None:
+    ws = tmp_path / "acme"
+    _write((ws / "general_C123") / "messages.json", [])
+    _write(ws / "files.json", [{"id": "F1", "name": "shot.png"}])
+    _write(ws / "canvases.json", [{"id": "Fc", "filetype": "canvas", "name": "notes"}])
+    client = DumpClient(tmp_path)
+    ids = {f["id"] for f in client.files_list()["files"]}
+    assert "F1" in ids
+    assert "Fc" in ids

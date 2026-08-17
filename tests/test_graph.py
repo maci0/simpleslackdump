@@ -58,6 +58,62 @@ def test_build_graph_mention_edge(tmp_path):
     assert ("alice", "bob") in links
 
 
+def test_build_graph_mention_from_text_raw(tmp_path):
+    _write_messages(
+        tmp_path,
+        [
+            {
+                "ts": "1.0",
+                "user": "U1",
+                "user_name": "alice",
+                "text": "hi",
+                "text_raw": "hi <@U2>",
+                "thread": [],
+                "files": [],
+            },
+            {
+                "ts": "2.0",
+                "user": "U2",
+                "user_name": "bob",
+                "text": "sure",
+                "thread": [],
+                "files": [],
+            },
+        ],
+    )
+    g = build_graph([tmp_path])
+    links = {(lnk["source"], lnk["target"]): lnk["value"] for lnk in g["links"]}
+    assert links[("alice", "bob")] == 1
+
+
+def test_build_graph_mention_text_and_text_raw_count_once(tmp_path):
+    _write_messages(
+        tmp_path,
+        [
+            {
+                "ts": "1.0",
+                "user": "U1",
+                "user_name": "alice",
+                "text": "@bob thanks",
+                "text_raw": "hi <@U2>",
+                "thread": [],
+                "files": [],
+            },
+            {
+                "ts": "2.0",
+                "user": "U2",
+                "user_name": "bob",
+                "text": "sure",
+                "thread": [],
+                "files": [],
+            },
+        ],
+    )
+    g = build_graph([tmp_path])
+    links = {(lnk["source"], lnk["target"]): lnk["value"] for lnk in g["links"]}
+    assert links[("alice", "bob")] == 1
+
+
 def test_build_graph_excludes_unknown(tmp_path):
     _write_messages(
         tmp_path,
@@ -103,6 +159,28 @@ def test_build_graph_reads_thread_dumps(tmp_path):
     assert "carol" in ids
     carol = next(n for n in g["nodes"] if n["id"] == "carol")
     assert carol["replies"] == 1
+
+
+def test_build_graph_thread_dump_parent_reply_edge(tmp_path):
+    thread_dir = tmp_path / "thread_1_0"
+    thread_dir.mkdir()
+    (thread_dir / "thread.json").write_text(
+        json.dumps(
+            [
+                {"ts": "1.0", "user_name": "alice", "text": "root", "files": []},
+                {"ts": "1.1", "user_name": "bob", "text": "reply", "files": []},
+            ]
+        )
+    )
+    g = build_graph([tmp_path])
+    alice = next(n for n in g["nodes"] if n["id"] == "alice")
+    bob = next(n for n in g["nodes"] if n["id"] == "bob")
+    assert alice["messages"] == 1
+    assert alice["replies"] == 0
+    assert bob["messages"] == 0
+    assert bob["replies"] == 1
+    links = {(lnk["source"], lnk["target"]) for lnk in g["links"]}
+    assert ("bob", "alice") in links
 
 
 def test_render_html_escapes_script_injection(tmp_path):
