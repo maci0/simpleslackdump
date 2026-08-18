@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 # Runtime deps are intentionally small. HTTP uses stdlib urllib; AES/LevelDB are extras.
 dependencies = [
     "slack-sdk>=3.27",  # live Slack Web API client
-    "click>=8.1",  # CLI
+    "click>=8.4.2",  # CLI
     "tomlkit>=0.13",  # read/write ssd.toml (stdlib tomllib is read-only)
     "orjson>=3.12.0",  # fast dump JSON read/write
 ]
