@@ -68,9 +68,7 @@ def _existing_channel_dir(ws: Path, channel_id: str) -> Path | None:
 def _ts_to_dt(ts: str) -> datetime:
     usec = ts_key(ts)
     # Integer floor to whole seconds; keep the remainder as microsecond.
-    return datetime.fromtimestamp(usec // 1_000_000, tz=UTC).replace(
-        microsecond=usec % 1_000_000
-    )
+    return datetime.fromtimestamp(usec // 1_000_000, tz=UTC).replace(microsecond=usec % 1_000_000)
 
 
 def _file_link_lines(

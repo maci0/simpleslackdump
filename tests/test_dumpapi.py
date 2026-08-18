@@ -2770,8 +2770,18 @@ def _msg(ts: str, text: str) -> dict:
             {"id": "Ft", "name": "pyproject.toml", "filetype": "toml"},
         ),
         ("has:python", "has:py", "script", {"id": "Fp", "name": "app.py", "filetype": "python"}),
-        ("has:video", "has:video", "clip", {"id": "Fv", "name": "a.mp4", "filetype": "mp4", "mimetype": "video/mp4"}),
-        ("has:audio", "has:audio", "sound", {"id": "Fa", "name": "a.mp3", "filetype": "mp3", "mimetype": "audio/mpeg"}),
+        (
+            "has:video",
+            "has:video",
+            "clip",
+            {"id": "Fv", "name": "a.mp4", "filetype": "mp4", "mimetype": "video/mp4"},
+        ),
+        (
+            "has:audio",
+            "has:audio",
+            "sound",
+            {"id": "Fa", "name": "a.mp3", "filetype": "mp3", "mimetype": "audio/mpeg"},
+        ),
     ],
     ids=[
         "space",
@@ -3694,7 +3704,9 @@ def test_iter_usergroups(tmp_path: Path) -> None:
     ],
     ids=["locked", "tombstone", "app", "file_share", "hidden", "x_files", "me_message", "metadata"],
 )
-def test_search_simple_message_flag(tmp_path: Path, key: str, value: Any, query: str, hit_text: str) -> None:
+def test_search_simple_message_flag(
+    tmp_path: Path, key: str, value: Any, query: str, hit_text: str
+) -> None:
     special = _msg("1.0", hit_text)
     special[key] = value
     plain = _msg("2.0", "plain")

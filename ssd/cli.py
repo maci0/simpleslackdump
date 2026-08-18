@@ -35,15 +35,9 @@ def _token_path(output: Path, token_file: str | None) -> Path:
     """
     name = str(token_file or ".token")
     part = Path(name)
-    if (
-        part.is_absolute()
-        or len(part.parts) != 1
-        or part.parts[0] in (".", "..")
-        or "\x00" in name
-    ):
+    if part.is_absolute() or len(part.parts) != 1 or part.parts[0] in (".", "..") or "\x00" in name:
         raise click.ClickException(
-            "settings.token_file must be a single filename inside output_dir "
-            f"(got {name!r})"
+            f"settings.token_file must be a single filename inside output_dir (got {name!r})"
         )
     return output / part
 
@@ -114,10 +108,7 @@ def token(ctx: click.Context) -> None:
         hint = ""
         missing = missing_optional_extras()
         if "chrome" in missing:
-            hint = (
-                " Chrome cookie decryption needs the chrome extra "
-                "(uv sync --extra chrome)."
-            )
+            hint = " Chrome cookie decryption needs the chrome extra (uv sync --extra chrome)."
         click.echo(
             "Warning: could not extract a valid d cookie from any source. "
             "Make sure Chrome or Firefox is open and signed into Slack, "
@@ -491,4 +482,3 @@ def graph(
 
 
 main.add_command(query_cmd)
-

@@ -470,9 +470,7 @@ class SlackAPI:
             new.sort(key=lambda m: ts_key(m["ts"]))
             if new:
                 if thread_ts:
-                    yield from (
-                        self.enrich_reply(r, channel_id=channel_id, team=team) for r in new
-                    )
+                    yield from (self.enrich_reply(r, channel_id=channel_id, team=team) for r in new)
                 else:
                     yield from (
                         {

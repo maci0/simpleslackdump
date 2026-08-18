@@ -151,9 +151,7 @@ def _download_file(url: str, target: Path, size: int | None, token: str) -> bool
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     tmp = target.with_name(target.name + ".tmp")
     # Prefer the declared size as the ceiling when known; always hard-cap.
-    byte_limit = (
-        min(_DOWNLOAD_BYTES_MAX, declared) if declared is not None else _DOWNLOAD_BYTES_MAX
-    )
+    byte_limit = min(_DOWNLOAD_BYTES_MAX, declared) if declared is not None else _DOWNLOAD_BYTES_MAX
     assert byte_limit >= 0
     try:
         with (
@@ -166,9 +164,7 @@ def _download_file(url: str, target: Path, size: int | None, token: str) -> bool
                 if not chunk:
                     break
                 if written + len(chunk) > byte_limit:
-                    raise OSError(
-                        f"download exceeded {byte_limit} byte limit for {target.name}"
-                    )
+                    raise OSError(f"download exceeded {byte_limit} byte limit for {target.name}")
                 fh.write(chunk)
                 written += len(chunk)
         os.replace(tmp, target)

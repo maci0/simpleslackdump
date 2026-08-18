@@ -10,7 +10,6 @@ from typing import Any
 from ssd.api import SlackAPI
 from ssd.attachments import download_attachments
 from ssd.output import (
-    reply_count_int,
     channel_dir,
     max_ts,
     merge_by_ts,
@@ -18,6 +17,7 @@ from ssd.output import (
     read_cursor,
     read_json,
     reconcile_thread_meta,
+    reply_count_int,
     write_cursor_from_messages,
     write_cursor_from_thread,
     write_messages,
@@ -190,9 +190,7 @@ def run_sync(
                 team = api.get_workspace()
             except Exception:
                 team = ""
-            enriched = [
-                api.enrich_reply(r, channel_id=channel_id, team=team) for r in raw_replies
-            ]
+            enriched = [api.enrich_reply(r, channel_id=channel_id, team=team) for r in raw_replies]
             if attachments_enabled and token:
                 # README: files land in <channel_dir>/attachments/, including thread dumps.
                 enriched = download_attachments(out_dir, enriched, token)

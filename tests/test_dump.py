@@ -391,9 +391,7 @@ def test_run_dump_thread_url(tmp_path, mock_api):
     )
     mock_api.get_messages.assert_not_called()
     mock_api.get_replies.assert_called_once()
-    mock_api.enrich_reply.assert_called_once_with(
-        raw_reply, channel_id="C123", team="testteam"
-    )
+    mock_api.enrich_reply.assert_called_once_with(raw_reply, channel_id="C123", team="testteam")
     assert mock_api.get_replies.call_args.kwargs.get("include_parent") is True
     thread_json = next((tmp_path / "testteam").rglob("thread.json"))
     rows = json.loads(thread_json.read_text())

@@ -213,8 +213,7 @@ def test_graph_discovers_thread_only_channel_dir(invoke, tmp_path, mocker):
     td = ch / "thread_2_0"
     td.mkdir(parents=True)
     (td / "thread.json").write_text(
-        '[{"ts":"2.0","user":"U1","user_name":"alice","text":"hi",'
-        '"reactions":[],"files":[]}]',
+        '[{"ts":"2.0","user":"U1","user_name":"alice","text":"hi","reactions":[],"files":[]}]',
         encoding="utf-8",
     )
     out = tmp_path / "g.html"
@@ -3406,9 +3405,7 @@ def test_token_file_rejects_path_escape(invoke, tmp_path, monkeypatch):
     cfg = tmp_path / "ssd.toml"
     # Absolute path would otherwise replace Path(output) entirely.
     cfg.write_text(
-        "[settings]\n"
-        f'output_dir = "{out.as_posix()}"\n'
-        f'token_file = "{outside.as_posix()}"\n',
+        f'[settings]\noutput_dir = "{out.as_posix()}"\ntoken_file = "{outside.as_posix()}"\n',
         encoding="utf-8",
     )
     monkeypatch.setattr("ssd.token.extract_token", lambda: "xoxc-should-not-write")
@@ -3419,9 +3416,7 @@ def test_token_file_rejects_path_escape(invoke, tmp_path, monkeypatch):
     assert not outside.exists()
 
     cfg.write_text(
-        "[settings]\n"
-        f'output_dir = "{out.as_posix()}"\n'
-        'token_file = "../escaped.token"\n',
+        f'[settings]\noutput_dir = "{out.as_posix()}"\ntoken_file = "../escaped.token"\n',
         encoding="utf-8",
     )
     result = invoke("--config", str(cfg), "token")
