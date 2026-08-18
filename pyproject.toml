@@ -33,7 +33,7 @@ build-backend = "hatchling.build"
 dev = [
     "pytest>=8.0",
     "pytest-mock>=3.12",
-    "ruff>=0.15.18",
+    "ruff>=0.16.3",
     "mypy>=1.11",
 ]
 
