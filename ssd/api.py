@@ -1,131 +1,131 @@
-import contextlib
+"""Live Slack Web API client (`SlackAPI`) used by dump, sync, and watch."""
+
 import re
+import sys
 import time
 from collections.abc import Iterator
 from typing import Any
 from urllib.parse import quote, urlparse
 
-import click
 from slack_sdk import WebClient
 
-_ID_RE = re.compile(r"^[CDG][A-Z0-9a-z]+$")
+from ssd.parser import ALL_CONV_TYPES, is_slack_id, ts_key
+
 _MENTION_RE = re.compile(r"<@([A-Z0-9a-z]+)>")
-_ALL_CONV_TYPES = "public_channel,private_channel,mpim,im"
 _WATCH_MIN_INTERVAL = 5.0
-_PASSTHROUGH = (
-    "subtype",
-    "bot_id",
-    "app_id",
-    "username",
-    "edited",
-    "blocks",
-    "attachments",
-    "pinned_to",
-    "pinned_info",
-    "client_msg_id",
-    "team",
-    "parent_user_id",
-    "reply_count",
-    "reply_users",
-    "reply_users_count",
-    "latest_reply",
-    "is_locked",
-    "subscribed",
-    "room",
-    "call",
-    "hidden",
-    "reply_broadcast",
-    "bot_profile",
-    "metadata",
-    "x_files",
-    "root",
-    "display_as_bot",
-    "event_ts",
-    "inviter",
-    "upload",
-    "source_team",
-    "user_team",
-    "topic",
-    "purpose",
-    "old_name",
-    "name",
-    "comment",
-    "no_notifications",
-    "is_starred",
-    "bot_link",
-    "icons",
-    "file",
-    "language",
-    "is_intro",
-    "assistant_app_thread",
-    "connected_team_ids",
-    "is_ephemeral",
-    "pending_shared",
-    "file_id",
-    "is_moved",
-    "parent_conversation",
-    "is_delayed_message",
-    "scheduled_message_id",
-    "pending_connected_team_ids",
-    "channel_type",
-    "no_display",
-    "is_thread_mention",
-    "permalink_public",
-    "skip_channel_mention_warning",
-    "is_auto_split",
-    "unfurl_links",
-    "unfurl_media",
-    "thread_broadcast",
-    "is_limited",
-    "item_type",
-    "item",
-    "replies",
-    "deleted_ts",
-    "hidden_by",
-    "with_files",
-    "signature",
-    "preview",
-    "last_read",
-    "unread_count",
-    "unread_count_display",
-    "is_restricted",
-    "preview_highlights",
-    "plain_text",
-    "is_unlocked",
-    "preview_plain_text",
-    "lines",
-    "lines_more",
-    "num_stars",
-    "permalink",
-    "user_profile",
-    "is_tombstone",
-    "members",
-    "source_team_id",
-    "user_team_id",
-    "is_channel_mention",
-    "parse",
-    "mrkdwn",
-    "item_user",
-    "old_topic",
-    "old_purpose",
-    "invited_user",
-    "deleted",
-    "is_highlighted",
-    "client_context_team_id",
-    "saved",
-    "local_files",
-    "shares",
-    "app_unfurl_url",
-    "thread_ts",
-    "is_share",
+# Hard cap so a stuck/malicious cursor cannot paginate forever.
+_MAX_PAGES = 100_000
+# Explicit connect/read budget for every Web API call (slack_sdk default is 30s).
+_API_TIMEOUT = 30
+_PASSTHROUGH = frozenset(
+    {
+        "subtype",
+        "bot_id",
+        "app_id",
+        "username",
+        "edited",
+        "blocks",
+        "attachments",
+        "pinned_to",
+        "pinned_info",
+        "client_msg_id",
+        "team",
+        "parent_user_id",
+        "reply_count",
+        "reply_users",
+        "reply_users_count",
+        "latest_reply",
+        "is_locked",
+        "subscribed",
+        "room",
+        "call",
+        "hidden",
+        "reply_broadcast",
+        "bot_profile",
+        "metadata",
+        "x_files",
+        "root",
+        "display_as_bot",
+        "event_ts",
+        "inviter",
+        "upload",
+        "source_team",
+        "user_team",
+        "topic",
+        "purpose",
+        "old_name",
+        "name",
+        "comment",
+        "no_notifications",
+        "is_starred",
+        "bot_link",
+        "icons",
+        "file",
+        "language",
+        "is_intro",
+        "assistant_app_thread",
+        "connected_team_ids",
+        "is_ephemeral",
+        "pending_shared",
+        "file_id",
+        "is_moved",
+        "parent_conversation",
+        "is_delayed_message",
+        "scheduled_message_id",
+        "pending_connected_team_ids",
+        "channel_type",
+        "no_display",
+        "is_thread_mention",
+        "permalink_public",
+        "skip_channel_mention_warning",
+        "is_auto_split",
+        "unfurl_links",
+        "unfurl_media",
+        "thread_broadcast",
+        "is_limited",
+        "item_type",
+        "item",
+        "replies",
+        "deleted_ts",
+        "hidden_by",
+        "with_files",
+        "signature",
+        "preview",
+        "last_read",
+        "unread_count",
+        "unread_count_display",
+        "is_restricted",
+        "preview_highlights",
+        "plain_text",
+        "is_unlocked",
+        "preview_plain_text",
+        "lines",
+        "lines_more",
+        "num_stars",
+        "permalink",
+        "user_profile",
+        "is_tombstone",
+        "members",
+        "source_team_id",
+        "user_team_id",
+        "is_channel_mention",
+        "parse",
+        "mrkdwn",
+        "item_user",
+        "old_topic",
+        "old_purpose",
+        "invited_user",
+        "deleted",
+        "is_highlighted",
+        "client_context_team_id",
+        "saved",
+        "local_files",
+        "shares",
+        "app_unfurl_url",
+        "thread_ts",
+        "is_share",
+    }
 )
-
-
-def _url_encode_cookie(cookie: str) -> str:
-    """URL-encode the xoxd- cookie value for use in a Cookie header.
-    Slack stores the cookie URL-encoded (/ -> %2F, + -> %2B).
-    """
-    return quote(cookie, safe="")
 
 
 def _channel_record(ch: dict[str, Any]) -> dict[str, Any]:
@@ -214,9 +214,11 @@ def _channel_record(ch: dict[str, Any]) -> dict[str, Any]:
 
 class SlackAPI:
     def __init__(self, token: str, delay: float = 1.0, cookie: str | None = None):
-        # xoxc- tokens require the d cookie sent alongside; xoxd-/xoxb- work standalone
-        headers = {"Cookie": f"d={_url_encode_cookie(cookie)}"} if cookie else {}
-        self.client = WebClient(token=token, headers=headers)
+        # xoxc- tokens require the d cookie sent alongside; xoxd-/xoxb- work standalone.
+        # The xoxd- value contains URL-unsafe characters (/, +) that must be encoded in the
+        # Cookie header; extract_cookie() returns the decoded form, so re-encode here.
+        headers = {"Cookie": f"d={quote(cookie, safe='')}"} if cookie else {}
+        self.client = WebClient(token=token, headers=headers, timeout=_API_TIMEOUT)
         self.delay = delay
         self._user_cache: dict[str, str] = {}
         self._profile_cache: dict[str, dict[str, Any]] = {}
@@ -242,8 +244,13 @@ class SlackAPI:
         self._auth_teams: list[dict[str, Any]] | None = None
         self._remote_files: list[dict[str, Any]] | None = None
         self._file_info: dict[str, dict[str, Any]] = {}
+        self._members_cache: dict[str, list[str]] = {}
+        self._workspace_cache: str | None = None
+        self._channel_by_name: dict[str, tuple[str, str]] | None = None
 
     def get_workspace(self) -> str:
+        if self._workspace_cache is not None:
+            return self._workspace_cache
         resp = self.auth_payload()
         # Enterprise Grid workspaces omit team_domain; extract from url instead
         domain = resp.get("team_domain")
@@ -257,6 +264,7 @@ class SlackAPI:
                 "Could not determine workspace domain from auth.test response. "
                 "Check that the token is valid."
             )
+        self._workspace_cache = domain
         return domain
 
     def auth_payload(self) -> dict[str, Any]:
@@ -279,30 +287,57 @@ class SlackAPI:
 
     def get_auth_teams(self) -> list[dict[str, Any]]:
         if self._auth_teams is None:
-            items: list[dict[str, Any]] = []
-            cursor = None
-            while True:
-                kwargs: dict[str, Any] = {"limit": 100, "include_icon": True}
-                if cursor:
-                    kwargs["cursor"] = cursor
-                resp = self.client.auth_teams_list(**kwargs)
-                items.extend(resp.get("teams") or [])
-                cursor = (resp.get("response_metadata") or {}).get("next_cursor") or ""
-                if not cursor:
-                    break
-                time.sleep(self.delay)
-            self._auth_teams = items
+            self._auth_teams = self._cursor_paginate(
+                self.client.auth_teams_list, {"limit": 100, "include_icon": True}, "teams"
+            )
         return self._auth_teams
 
     def resolve_channel(self, name_or_id: str) -> tuple[str, str]:
-        if _ID_RE.match(name_or_id):
+        if is_slack_id(name_or_id):
             info = self.client.conversations_info(channel=name_or_id)["channel"]
             return info["id"], info["name"]
         want = name_or_id.lstrip("#")
-        for ch in self.list_conversations():
-            if str(ch.get("name") or "") == want:
-                return str(ch["id"]), str(ch.get("name") or "")
+        # Build a name→(id,name) index on first use; list_conversations() is already cached.
+        if self._channel_by_name is None:
+            self._channel_by_name = {
+                str(ch.get("name") or ""): (str(ch["id"]), str(ch.get("name") or ""))
+                for ch in self.list_conversations()
+                if ch.get("name")
+            }
+        hit = self._channel_by_name.get(want)
+        if hit is not None:
+            return hit
         raise ValueError(f"Channel not found: {name_or_id}")
+
+    def _sdk_call(
+        self,
+        sdk_method: Any,
+        kwargs: dict[str, Any],
+        max_retries: int = 3,
+    ) -> Any:
+        """Call a slack_sdk method with retries for rate limits and transient I/O errors."""
+        assert max_retries >= 1
+        last_exc: Exception | None = None
+        for attempt in range(max_retries):
+            try:
+                return sdk_method(**kwargs)
+            except Exception as exc:
+                resp_obj = getattr(exc, "response", None)
+                get_error = getattr(resp_obj, "get", None)
+                err = get_error("error") if callable(get_error) else None
+                if err == "ratelimited" or isinstance(exc, (TimeoutError, OSError)):
+                    last_exc = exc
+                    if attempt < max_retries - 1:
+                        wait = self.delay * (2**attempt)
+                        print(
+                            f"  [retry {attempt + 1}/{max_retries}] {exc.__class__.__name__}"
+                            f" waiting {wait:.1f}s",
+                            file=sys.stderr,
+                        )
+                        time.sleep(wait)
+                    continue
+                raise
+        raise RuntimeError("Slack API request failed after retries") from last_exc
 
     def _paginate(
         self,
@@ -313,43 +348,77 @@ class SlackAPI:
     ) -> list[dict[str, Any]]:
         items = []
         cursor = None
+        page_count = 0
         while True:
+            page_count += 1
+            if page_count > _MAX_PAGES:
+                raise RuntimeError(f"Slack pagination exceeded {_MAX_PAGES} pages")
             kwargs = dict(base_kwargs)
             if oldest is not None:
                 kwargs["oldest"] = oldest
             if cursor:
                 kwargs["cursor"] = cursor
-            # Retry loop for transient network/rate-limit errors
-            resp = None
-            for attempt in range(max_retries):
-                try:
-                    resp = sdk_method(**kwargs)
-                    break
-                except Exception as exc:
-                    err = getattr(getattr(exc, "response", None), "get", lambda k, d=None: d)(
-                        "error"
-                    )
-                    if err == "ratelimited" or isinstance(exc, (TimeoutError, OSError)):
-                        wait = self.delay * (2**attempt)
-                        click.echo(
-                            f"  [retry {attempt + 1}/{max_retries}] {exc.__class__.__name__}"
-                            f" waiting {wait:.1f}s",
-                            err=True,
-                        )
-                        time.sleep(wait)
-                    else:
-                        raise
-            if resp is None:
-                raise RuntimeError("Slack API request failed after retries")
+            resp = self._sdk_call(sdk_method, kwargs, max_retries=max_retries)
             page = resp.get("messages")
             if page is None:
-                break  # unexpected response shape — stop paginating rather than silently dropping
+                break  # unexpected response shape: stop paginating rather than silently dropping
             items.extend(page)
             if not resp.get("has_more"):
                 break
             cursor = resp.get("response_metadata", {}).get("next_cursor", "")
             if not cursor:
                 break
+            time.sleep(self.delay)
+        return items
+
+    def _cursor_paginate(
+        self,
+        sdk_method: Any,
+        base_kwargs: dict[str, Any],
+        result_key: str,
+        max_retries: int = 3,
+    ) -> list[Any]:
+        items: list[Any] = []
+        cursor = None
+        page_count = 0
+        while True:
+            page_count += 1
+            if page_count > _MAX_PAGES:
+                raise RuntimeError(f"Slack pagination exceeded {_MAX_PAGES} pages")
+            kwargs = dict(base_kwargs)
+            if cursor:
+                kwargs["cursor"] = cursor
+            resp = self._sdk_call(sdk_method, kwargs, max_retries=max_retries)
+            items.extend(resp.get(result_key) or [])
+            cursor = (resp.get("response_metadata") or {}).get("next_cursor") or ""
+            if not cursor:
+                break
+            time.sleep(self.delay)
+        return items
+
+    def _page_paginate(
+        self,
+        sdk_method: Any,
+        base_kwargs: dict[str, Any],
+        result_key: str,
+        max_retries: int = 3,
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            if page > _MAX_PAGES:
+                raise RuntimeError(f"Slack pagination exceeded {_MAX_PAGES} pages")
+            resp = self._sdk_call(
+                sdk_method, {**base_kwargs, "page": page}, max_retries=max_retries
+            )
+            items.extend(resp.get(result_key) or [])
+            paging = resp.get("paging") or {}
+            pages = int(paging.get("pages") or 1)
+            if pages > _MAX_PAGES:
+                raise RuntimeError(f"Slack paging.pages={pages} exceeds {_MAX_PAGES}")
+            if page >= pages:
+                break
+            page += 1
             time.sleep(self.delay)
         return items
 
@@ -384,21 +453,33 @@ class SlackAPI:
             if interval is None
             else float(interval)
         )
-        with contextlib.suppress(Exception):
+        try:
             self.fetch_workspace_users()
+        except Exception as exc:
+            print(f"  workspace users skipped: {exc}", file=sys.stderr, flush=True)
+        try:
+            team = self.get_workspace()
+        except Exception:
+            team = ""
         while True:
             if thread_ts:
                 raw = self.get_replies(channel_id, thread_ts, oldest=cursor, include_parent=True)
             else:
                 raw = self.get_messages(channel_id, oldest=cursor)
-            new = [m for m in raw if m.get("ts") and float(m["ts"]) > float(cursor)]
-            new.sort(key=lambda m: float(m["ts"]))
+            new = [m for m in raw if m.get("ts") and ts_key(m["ts"]) > ts_key(cursor)]
+            new.sort(key=lambda m: ts_key(m["ts"]))
             if new:
                 if thread_ts:
-                    yield from (self.enrich_reply(r, channel_id=channel_id) for r in new)
+                    yield from (
+                        self.enrich_reply(r, channel_id=channel_id, team=team) for r in new
+                    )
                 else:
                     yield from (
-                        {**self.enrich_reply(m, channel_id=channel_id), "thread": []} for m in new
+                        {
+                            **self.enrich_reply(m, channel_id=channel_id, team=team),
+                            "thread": [],
+                        }
+                        for m in new
                     )
                 cursor = str(new[-1]["ts"])
             time.sleep(wait)
@@ -410,6 +491,12 @@ class SlackAPI:
         oldest: str | None = None,
         include_parent: bool = False,
     ) -> list[dict[str, Any]]:
+        """Fetch replies for a thread. By default, the parent message is excluded.
+
+        When ``include_parent`` is True, Slack returns the parent as the first item
+        (ts == thread_ts) alongside the replies; pass True when the caller needs the
+        parent message (e.g. initial thread dumps).
+        """
         raw = self._paginate(
             self.client.conversations_replies,
             {"channel": channel_id, "ts": thread_ts, "limit": 200, "include_all_metadata": True},
@@ -430,8 +517,11 @@ class SlackAPI:
             user_obj = dict(self.client.users_info(user=user_id, include_locale=True)["user"])
             user_obj.setdefault("id", user_id)
             self._cache_user_obj(user_obj)
-        except Exception:
-            self._user_cache[user_id] = user_id
+        except Exception as exc:
+            # Do not cache the failure: a transient rate-limit would otherwise
+            # pin the raw user id for the rest of the process.
+            print(f"  user {user_id}: lookup failed ({exc})", file=sys.stderr, flush=True)
+            return user_id
         return self._user_cache[user_id]
 
     def _cache_user_obj(self, user_obj: dict[str, Any]) -> None:
@@ -520,19 +610,11 @@ class SlackAPI:
         )
 
     def get_channel_members(self, channel_id: str) -> list[str]:
-        members: list[str] = []
-        cursor = None
-        while True:
-            kwargs: dict[str, Any] = {"channel": channel_id, "limit": 200}
-            if cursor:
-                kwargs["cursor"] = cursor
-            resp = self.client.conversations_members(**kwargs)
-            members.extend(resp.get("members") or [])
-            cursor = (resp.get("response_metadata") or {}).get("next_cursor") or ""
-            if not cursor:
-                break
-            time.sleep(self.delay)
-        return members
+        if channel_id not in self._members_cache:
+            self._members_cache[channel_id] = self._cursor_paginate(
+                self.client.conversations_members, {"channel": channel_id, "limit": 200}, "members"
+            )
+        return self._members_cache[channel_id]
 
     def get_emoji(self) -> dict[str, str]:
         self._ensure_emoji()
@@ -570,61 +652,27 @@ class SlackAPI:
 
     def fetch_workspace_users(self) -> dict[str, dict[str, Any]]:
         if not self._users_listed:
-            cursor = None
-            while True:
-                kwargs: dict[str, Any] = {"limit": 200, "include_locale": True}
-                if cursor:
-                    kwargs["cursor"] = cursor
-                resp = self.client.users_list(**kwargs)
-                for user_obj in resp.get("members") or []:
-                    if isinstance(user_obj, dict):
-                        self._cache_user_obj(user_obj)
-                cursor = (resp.get("response_metadata") or {}).get("next_cursor") or ""
-                if not cursor:
-                    break
-                time.sleep(self.delay)
+            for user_obj in self._cursor_paginate(
+                self.client.users_list, {"limit": 200, "include_locale": True}, "members"
+            ):
+                if isinstance(user_obj, dict):
+                    self._cache_user_obj(user_obj)
             self._users_listed = True
         return self.get_user_profiles()
 
     def list_conversations(self) -> list[dict[str, Any]]:
         if self._conversations is None:
-            items: list[dict[str, Any]] = []
-            cursor = None
-            while True:
-                kwargs: dict[str, Any] = {
-                    "types": _ALL_CONV_TYPES,
-                    "limit": 200,
-                    "exclude_archived": False,
-                }
-                if cursor:
-                    kwargs["cursor"] = cursor
-                resp = self.client.conversations_list(**kwargs)
-                for ch in resp.get("channels") or []:
-                    if not isinstance(ch, dict):
-                        continue
-                    items.append(_channel_record(ch))
-                cursor = (resp.get("response_metadata") or {}).get("next_cursor") or ""
-                if not cursor:
-                    break
-                time.sleep(self.delay)
-            self._conversations = items
+            raw = self._cursor_paginate(
+                self.client.conversations_list,
+                {"types": ALL_CONV_TYPES, "limit": 200, "exclude_archived": False},
+                "channels",
+            )
+            self._conversations = [_channel_record(ch) for ch in raw if isinstance(ch, dict)]
         return self._conversations
 
     def get_stars(self) -> list[dict[str, Any]]:
         if self._stars is None:
-            items: list[dict[str, Any]] = []
-            cursor = None
-            while True:
-                kwargs: dict[str, Any] = {"limit": 100}
-                if cursor:
-                    kwargs["cursor"] = cursor
-                resp = self.client.stars_list(**kwargs)
-                items.extend(resp.get("items") or [])
-                cursor = (resp.get("response_metadata") or {}).get("next_cursor") or ""
-                if not cursor:
-                    break
-                time.sleep(self.delay)
-            self._stars = items
+            self._stars = self._cursor_paginate(self.client.stars_list, {"limit": 100}, "items")
         return self._stars
 
     def get_reminders(self) -> list[dict[str, Any]]:
@@ -635,7 +683,7 @@ class SlackAPI:
 
     def get_dnd(self) -> dict[str, Any]:
         if self._dnd is None:
-            raw = self.client.dnd_teamInfo().get("users") or {}
+            raw = self.client.dnd_teamInfo().get("users") or {}  # type: ignore[call-arg]  # SDK stubs mark users as required but the API returns all-team DND without it
             self._dnd = dict(raw) if isinstance(raw, dict) else {}
         return self._dnd
 
@@ -653,18 +701,11 @@ class SlackAPI:
 
     def get_files(self) -> list[dict[str, Any]]:
         if self._files_list is None:
-            items: list[dict[str, Any]] = []
-            page = 1
-            while True:
-                resp = self.client.files_list(count=100, page=page, show_files_hidden_by_limit=True)
-                items.extend(resp.get("files") or [])
-                paging = resp.get("paging") or {}
-                pages = int(paging.get("pages") or 1)
-                if page >= pages:
-                    break
-                page += 1
-                time.sleep(self.delay)
-            self._files_list = items
+            self._files_list = self._page_paginate(
+                self.client.files_list,
+                {"count": 100, "show_files_hidden_by_limit": True},
+                "files",
+            )
         return self._files_list
 
     def get_file_info(self, file_id: str) -> dict[str, Any]:
@@ -681,19 +722,9 @@ class SlackAPI:
 
     def get_remote_files(self) -> list[dict[str, Any]]:
         if self._remote_files is None:
-            items: list[dict[str, Any]] = []
-            cursor = None
-            while True:
-                kwargs: dict[str, Any] = {"limit": 100}
-                if cursor:
-                    kwargs["cursor"] = cursor
-                resp = self.client.files_remote_list(**kwargs)
-                items.extend(resp.get("files") or [])
-                cursor = (resp.get("response_metadata") or {}).get("next_cursor") or ""
-                if not cursor:
-                    break
-                time.sleep(self.delay)
-            self._remote_files = items
+            self._remote_files = self._cursor_paginate(
+                self.client.files_remote_list, {"limit": 100}, "files"
+            )
         return self._remote_files
 
     def get_presence(self, user: str | None = None) -> dict[str, Any]:
@@ -717,34 +748,16 @@ class SlackAPI:
 
     def get_integration_logs(self) -> list[dict[str, Any]]:
         if self._integration_logs is None:
-            items: list[dict[str, Any]] = []
-            page = 1
-            while True:
-                resp = self.client.team_integrationLogs(count=100, page=page)
-                items.extend(resp.get("logs") or [])
-                paging = resp.get("paging") or {}
-                pages = int(paging.get("pages") or 1)
-                if page >= pages:
-                    break
-                page += 1
-                time.sleep(self.delay)
-            self._integration_logs = items
+            self._integration_logs = self._page_paginate(
+                self.client.team_integrationLogs, {"count": 100}, "logs"
+            )
         return self._integration_logs
 
     def get_access_logs(self) -> list[dict[str, Any]]:
         if self._access_logs is None:
-            items: list[dict[str, Any]] = []
-            page = 1
-            while True:
-                resp = self.client.team_accessLogs(count=100, page=page)
-                items.extend(resp.get("logins") or [])
-                paging = resp.get("paging") or {}
-                pages = int(paging.get("pages") or 1)
-                if page >= pages:
-                    break
-                page += 1
-                time.sleep(self.delay)
-            self._access_logs = items
+            self._access_logs = self._page_paginate(
+                self.client.team_accessLogs, {"count": 100}, "logins"
+            )
         return self._access_logs
 
     def get_team_preferences(self) -> dict[str, Any]:
@@ -763,60 +776,88 @@ class SlackAPI:
 
     def get_scheduled_messages(self) -> list[dict[str, Any]]:
         if self._scheduled is None:
-            items: list[dict[str, Any]] = []
-            cursor = None
-            while True:
-                kwargs: dict[str, Any] = {"limit": 100}
-                if cursor:
-                    kwargs["cursor"] = cursor
-                resp = self.client.chat_scheduledMessages_list(**kwargs)
-                items.extend(resp.get("scheduled_messages") or [])
-                cursor = (resp.get("response_metadata") or {}).get("next_cursor") or ""
-                if not cursor:
-                    break
-                time.sleep(self.delay)
-            self._scheduled = items
+            self._scheduled = self._cursor_paginate(
+                self.client.chat_scheduledMessages_list, {"limit": 100}, "scheduled_messages"
+            )
         return self._scheduled
 
-    def enrich_reply(self, r: dict[str, Any], channel_id: str | None = None) -> dict[str, Any]:
-        """Enrich a single reply dict — name resolution and mention substitution only,
-        no recursive thread fetch (replies don't have sub-threads)."""
+    def enrich_reply(
+        self,
+        r: dict[str, Any],
+        channel_id: str | None = None,
+        *,
+        team: str | None = None,
+    ) -> dict[str, Any]:
+        """Enrich a single reply dict: resolve user names, substitute mentions, add permalink.
+
+        No recursive thread fetch: replies don't have sub-threads.
+        Pass ``team`` (workspace domain) when enriching a batch so permalinks
+        skip a per-message ``get_workspace`` lookup.
+        """
         user_id = r.get("user", "")
         raw_text = r.get("text") or ""
+        files: list[dict[str, Any]] = list(r.get("files") or [])
+        solo = r.get("file")
+        if (
+            isinstance(solo, dict)
+            and solo.get("id")
+            and not any(isinstance(f, dict) and f.get("id") == solo["id"] for f in files)
+        ):
+            files = [*files, solo]
         out = {
             "ts": r["ts"],
             "user": user_id,
             "user_name": self.get_user_name(user_id) if user_id else "unknown",
             "text": self.resolve_mentions(raw_text),
             "text_raw": raw_text,
-            "reactions": [
-                {"name": rx["name"], "count": rx["count"], "users": rx.get("users", [])}
-                for rx in r.get("reactions", [])
-            ],
-            "files": r.get("files", []),
+            "files": files,
         }
-        for key in _PASSTHROUGH:
-            if key in r:
-                out[key] = r[key]
+        # Only copy reactions when the API sent them. Inventing [] makes merge
+        # overwrite archived reactions on every sync that omits the field.
+        if "reactions" in r:
+            out["reactions"] = [
+                {
+                    "name": rx.get("name") or "",
+                    "count": rx.get("count") or 0,
+                    "users": rx.get("users") or [],
+                }
+                for rx in r.get("reactions") or []
+                if isinstance(rx, dict)
+            ]
+        out.update({k: r[k] for k in r.keys() & _PASSTHROUGH})
         if channel_id and r.get("ts"):
-            try:
-                team = self.get_workspace()
-            except Exception:
-                team = ""
+            if team is None:
+                try:
+                    team = self.get_workspace()
+                except Exception:
+                    team = ""
             if team:
                 stamp = str(r["ts"]).replace(".", "")
                 out["permalink"] = f"https://{team}.slack.com/archives/{channel_id}/p{stamp}"
         return out
 
     def enrich(self, channel_id: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Enrich a batch of channel messages: resolve names, fetch thread replies.
+
+        For each message with reply_count > 0, fetches replies via conversations.replies
+        and nests them under ``msg["thread"]``. Top-level messages always have an empty
+        ``thread`` key so callers can uniformly iterate ``msg.get("thread", [])``.
+        """
+        try:
+            team = self.get_workspace()
+        except Exception:
+            team = ""
         result = []
         for msg in messages:
-            enriched = {**self.enrich_reply(msg, channel_id=channel_id), "thread": []}
-            # reply_count can be null from the API (deleted thread) — guard with or 0
+            enriched = {
+                **self.enrich_reply(msg, channel_id=channel_id, team=team),
+                "thread": [],
+            }
+            # reply_count can be null from the API (deleted thread); guard with or 0
             if (msg.get("reply_count") or 0) > 0:
                 raw_replies = self.get_replies(channel_id, msg["ts"])
                 enriched["thread"] = [
-                    self.enrich_reply(r, channel_id=channel_id) for r in raw_replies
+                    self.enrich_reply(r, channel_id=channel_id, team=team) for r in raw_replies
                 ]
             result.append(enriched)
         return result

@@ -1,23 +1,38 @@
-import json
+"""Incremental sync orchestration from cursors and config entries."""
+
+import re
+import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
-
-import click
+from typing import Any
 
 from ssd.api import SlackAPI
-from ssd.dump import _prefetch_users, _write_sidecars, write_channel_stats
+from ssd.attachments import download_attachments
 from ssd.output import (
-    _atomic_write,
-    _dumps,
+    reply_count_int,
     channel_dir,
-    format_markdown,
+    max_ts,
+    merge_by_ts,
     merge_messages,
     read_cursor,
-    write_cursor,
+    read_json,
+    reconcile_thread_meta,
+    write_cursor_from_messages,
+    write_cursor_from_thread,
     write_messages,
     write_users,
 )
-from ssd.parser import parse_target
+from ssd.parser import parse_target, ts_key
+from ssd.sidecars import (
+    persist_thread_dump,
+    prefetch_users,
+    write_channel_stats,
+    write_sidecars,
+)
+
+# Unix seconds or Slack ts (sec.usec). Rejects float literals like inf/1e10.
+_SINCE_TS_RE = re.compile(r"^\d+(\.\d+)?$")
 
 
 def _refresh_old_threads(
@@ -27,81 +42,96 @@ def _refresh_old_threads(
     sync_floor: str,
     token: str | None = None,
     attachments_enabled: bool = False,
-) -> None:
+) -> list[dict[str, Any]] | None:
     """Fetch new replies for threads on messages older than sync_floor.
 
     conversations_history with oldest= misses replies added to pre-sync_floor messages.
     This closes that gap by polling each known thread for replies newer than the
     last reply we already have.
-    """
-    import time
 
+    Returns the in-memory archive (possibly rewritten) so callers can reuse it for
+    stats/cursor without a second disk read. Returns None when messages.json is
+    missing or unreadable.
+    """
     messages_path = out_dir / "messages.json"
     if not messages_path.exists():
-        return
-    stored: list[dict] = json.loads(messages_path.read_text())
-    _prefetch_users(api)
+        return None
+    raw = read_json(messages_path)
+    if not isinstance(raw, list):
+        return None
+    stored: list[dict[str, Any]] = raw
+    prefetch_users(api)
     refreshed = 0
+    try:
+        team = api.get_workspace()
+    except Exception:
+        team = ""
     for msg in stored:
-        # Skip messages at or after the sync floor — already enriched in this run
-        if float(msg["ts"]) >= float(sync_floor):
+        msg_ts = msg.get("ts")
+        if not msg_ts:
             continue
-        thread = msg.get("thread")
-        if not thread:
+        # Skip messages newer than the sync floor: those were just enriched.
+        # Messages at the floor itself are not re-fetched (oldest= is filtered
+        # exclusive), so their threads still need a refresh pass here.
+        if ts_key(msg_ts) > ts_key(sync_floor):
             continue
-        latest_reply_ts = max(r["ts"] for r in thread)
+        thread = [r for r in (msg.get("thread") or []) if isinstance(r, dict) and r.get("ts")]
+        claimed = reply_count_int(msg)
+        # Known threads, or parents that claimed replies but have none stored yet
+        # (failed enrich / partial dump). Brand-new threads on old messages with
+        # reply_count still 0 are not discoverable without an API call per message.
+        if not thread and claimed <= 0:
+            continue
         time.sleep(api.delay)  # respect rate limit between per-thread API calls
-        new_raw = api.get_replies(channel_id, msg["ts"], oldest=latest_reply_ts)
-        # oldest= is inclusive; skip the reply we already have
-        new_raw = [r for r in new_raw if float(r["ts"]) > float(latest_reply_ts)]
-        if not new_raw:
-            continue
-        new_enriched = [
-            api.enrich_reply(r, channel_id=channel_id) for r in new_raw
-        ]  # collect fully before mutating
-        if attachments_enabled and token:
-            from ssd.attachments import download_attachments
-
-            # download_attachments expects message dicts; wrap each reply as a standalone message
-            wrapped = [
-                {
-                    "ts": r["ts"],
-                    "user_name": r.get("user_name", ""),
-                    "text": r.get("text", ""),
-                    "reactions": [],
-                    "thread": [],
-                    "files": r.get("files", []),
-                }
-                for r in new_enriched
-            ]
-            downloaded = download_attachments(out_dir, wrapped, token)
-            # Merge file info back into new_enriched
-            file_map = {m["ts"]: m.get("files", []) for m in downloaded}
+        try:
+            if thread:
+                latest_reply_ts = max_ts(r["ts"] for r in thread)
+                new_raw = api.get_replies(channel_id, msg_ts, oldest=latest_reply_ts)
+                # oldest= is inclusive; skip the reply we already have
+                new_raw = [r for r in new_raw if ts_key(r["ts"]) > ts_key(latest_reply_ts)]
+            else:
+                new_raw = api.get_replies(channel_id, msg_ts)
+            if not new_raw:
+                continue
             new_enriched = [
-                {**r, "files": file_map.get(r["ts"], r.get("files", []))} for r in new_enriched
-            ]
-        msg["thread"].extend(new_enriched)
-        msg["thread"].sort(key=lambda r: float(r["ts"]))
-        refreshed += 1
+                api.enrich_reply(r, channel_id=channel_id, team=team) for r in new_raw
+            ]  # collect fully before mutating
+            if attachments_enabled and token:
+                # enrich_reply already returns message-shaped dicts with files/ts
+                new_enriched = download_attachments(out_dir, new_enriched, token)
+            msg["thread"] = merge_by_ts(thread, new_enriched)
+            reconcile_thread_meta(msg)
+            refreshed += 1
+        except Exception as exc:
+            print(f"  thread {msg_ts}: skipped ({exc})", file=sys.stderr, flush=True)
     if refreshed:
         write_messages(out_dir, stored)
-        click.echo(f"  {refreshed} threads refreshed with new replies")
+        print(f"  {refreshed} threads refreshed with new replies", flush=True)
+    return stored
 
 
 def _since_to_ts(since: str) -> str:
-    """Convert YYYY-MM-DD or Unix timestamp string to Unix timestamp string."""
+    """Convert YYYY-MM-DD or Unix/Slack timestamp string to a Unix timestamp string."""
+    raw = since.strip()
+    if _SINCE_TS_RE.fullmatch(raw):
+        return raw
     try:
-        float(since)
-        return since
-    except ValueError:
-        pass
-    try:
-        dt = datetime.strptime(since, "%Y-%m-%d").replace(tzinfo=UTC)
-        return str(dt.timestamp())
+        dt = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=UTC)
+        # Midnight UTC has no fractional seconds; avoid str(float) trailing ".0".
+        return str(int(dt.timestamp()))
     except ValueError:
         raise ValueError(
             f"Invalid --since value: {since!r}. Use YYYY-MM-DD or a Unix timestamp."
         ) from None
+
+
+def _sync_floor(since_ts: str | None, cursor_ts: str | None) -> str | None:
+    """Later of --since floor vs .cursor; either alone wins when the other is missing."""
+    if since_ts and cursor_ts:
+        if ts_key(since_ts) > ts_key(cursor_ts):
+            return since_ts
+        return cursor_ts
+    return cursor_ts or since_ts
 
 
 def run_sync(
@@ -113,91 +143,119 @@ def run_sync(
     token: str | None = None,
     attachments_enabled: bool = False,
 ) -> None:
+    """Fetch messages newer than ``.cursor`` (or ``since``), merge into the archive.
+
+    Uses the later of ``--since`` and the stored cursor as the fetch floor.
+    After fetching new top-level messages, scans each known thread for replies
+    newer than the last stored reply so replies to older threads are not missed.
+    Writes workspace sidecars only when missing (``refresh_workspace=False``);
+    per-channel sidecars are always rewritten.
+    """
     parsed = parse_target(target)
 
     if parsed.thread_ts:
+        assert parsed.channel_id is not None  # thread targets always carry a channel id
         channel_id = parsed.channel_id
         _, channel_name = api.resolve_channel(channel_id)
         out_dir = channel_dir(output_root, workspace, channel_name, channel_id)
         thread_dir = out_dir / f"thread_{parsed.thread_ts.replace('.', '_')}"
-        thread_dir.mkdir(parents=True, exist_ok=True)  # single mkdir
-        oldest = _since_to_ts(since) if since else read_cursor(thread_dir)
-        raw_replies = api.get_replies(
-            channel_id, parsed.thread_ts, oldest=oldest, include_parent=not oldest
-        )
-        # oldest= is inclusive — filter to strictly newer replies to avoid reprocessing cursor
-        if oldest:
-            raw_replies = [r for r in raw_replies if float(r["ts"]) > float(oldest)]
-        if not raw_replies:
-            click.echo("  no new replies")
-            return
-        _prefetch_users(api)
-        enriched = [api.enrich_reply(r, channel_id=channel_id) for r in raw_replies]
-        if attachments_enabled and token:
-            from ssd.attachments import download_attachments
-
-            enriched = download_attachments(thread_dir, enriched, token)
-        # load existing thread replies and merge by ts (incremental sync)
+        thread_dir.mkdir(parents=True, exist_ok=True)
+        since_ts = _since_to_ts(since) if since else None
+        cursor_ts = read_cursor(thread_dir)
+        # Match channel sync: floor is the later of --since vs .cursor.
+        oldest = _sync_floor(since_ts, cursor_ts)
         existing_path = thread_dir / "thread.json"
-        existing: list[dict] = (
-            json.loads(existing_path.read_text()) if existing_path.exists() else []
+        existing: list[Any] = read_json(existing_path) if existing_path.exists() else []
+        has_parent = any(isinstance(m, dict) and m.get("ts") == parsed.thread_ts for m in existing)
+        # Always fetch the parent when it is missing from thread.json, even if
+        # --since set an oldest floor (parent ts is typically older than that floor).
+        include_parent = not has_parent
+        raw_replies = api.get_replies(
+            channel_id, parsed.thread_ts, oldest=oldest, include_parent=include_parent
         )
-        by_ts = {m["ts"]: m for m in existing}
-        for m in enriched:
-            by_ts[m["ts"]] = m
-        sorted_msgs = sorted(by_ts.values(), key=lambda m: float(m["ts"]))
-        _atomic_write(thread_dir / "thread.json", _dumps(sorted_msgs))
-        _atomic_write(thread_dir / "thread.md", format_markdown(sorted_msgs))
-        write_cursor(thread_dir, max(m["ts"] for m in enriched))
-        write_users(thread_dir, api.get_user_profiles())
-        _write_sidecars(api, out_dir, channel_id, refresh_workspace=False)
-        n_replies = sum(1 for m in enriched if m.get("ts") != parsed.thread_ts)
-        click.echo(f"  thread {parsed.thread_ts}: {n_replies} new replies")
+        # oldest= is inclusive: filter to strictly newer replies to avoid reprocessing cursor.
+        # Keep a missing parent even when it falls at or before the floor.
+        if oldest:
+            raw_replies = [
+                r
+                for r in raw_replies
+                if ts_key(r["ts"]) > ts_key(oldest)
+                or (include_parent and r.get("ts") == parsed.thread_ts)
+            ]
+        if not raw_replies:
+            print("  no new replies", flush=True)
+        else:
+            prefetch_users(api)
+            try:
+                team = api.get_workspace()
+            except Exception:
+                team = ""
+            enriched = [
+                api.enrich_reply(r, channel_id=channel_id, team=team) for r in raw_replies
+            ]
+            if attachments_enabled and token:
+                # README: files land in <channel_dir>/attachments/, including thread dumps.
+                enriched = download_attachments(out_dir, enriched, token)
+            persist_thread_dump(
+                api,
+                out_dir,
+                thread_dir,
+                parsed.thread_ts,
+                channel_id,
+                enriched,
+                refresh_workspace=False,
+            )
+            n_replies = sum(1 for m in enriched if m.get("ts") != parsed.thread_ts)
+            print(f"  thread {parsed.thread_ts}: {n_replies} new replies", flush=True)
+        # Same as channel sync: archive is the watermark source of truth, so an
+        # empty poll still heals a drifted-high .cursor back to thread.json.
+        write_cursor_from_thread(thread_dir)
         return
 
-    if parsed.channel_id:
-        channel_id, channel_name = api.resolve_channel(parsed.channel_id)
-    else:
-        channel_id, channel_name = api.resolve_channel(parsed.channel_name)
+    ident = parsed.channel_id or parsed.channel_name
+    assert ident  # parse_target always sets channel_id or channel_name
+    channel_id, channel_name = api.resolve_channel(ident)
 
     out_dir = channel_dir(output_root, workspace, channel_name, channel_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     since_ts = _since_to_ts(since) if since else None
     cursor_ts = read_cursor(out_dir)
-    # since= is a floor — use the later of cursor vs floor so we never
+    # since= is a floor: use the later of cursor vs floor so we never
     # re-fetch messages already captured, but never go older than the floor.
-    if since_ts and cursor_ts:
-        oldest = since_ts if float(since_ts) > float(cursor_ts) else cursor_ts
-    else:
-        oldest = cursor_ts or since_ts
+    oldest = _sync_floor(since_ts, cursor_ts)
 
-    click.echo(f"  #{channel_name} ({channel_id}) oldest={oldest or 'all'} -> {out_dir}")
+    print(f"  #{channel_name} ({channel_id}) oldest={oldest or 'all'} -> {out_dir}", flush=True)
 
     raw_msgs = api.get_messages(channel_id, oldest=oldest)
+    # Slack oldest= is inclusive: keep only strictly newer messages, matching
+    # thread sync and watch_messages, so the cursor message is not re-merged.
+    if oldest:
+        raw_msgs = [m for m in raw_msgs if m.get("ts") and ts_key(m["ts"]) > ts_key(oldest)]
+    archive: list[dict[str, Any]] | None = None
     if raw_msgs:
-        _prefetch_users(api)
+        prefetch_users(api)
         enriched = api.enrich(channel_id, raw_msgs)
         if attachments_enabled and token:
-            from ssd.attachments import download_attachments
-
             enriched = download_attachments(out_dir, enriched, token)
-        merge_messages(out_dir, enriched)
-        latest = max(m["ts"] for m in enriched)
-        write_cursor(out_dir, latest)
-        click.echo(f"  {len(enriched)} new messages merged")
+        archive = merge_messages(out_dir, enriched)
+        print(f"  {len(enriched)} new messages merged", flush=True)
     else:
-        click.echo("  no new top-level messages")
+        print("  no new top-level messages", flush=True)
 
     # conversations_history with oldest= never returns thread replies for messages
-    # older than the cursor. Scan all stored threads for new replies explicitly.
-    # Only check threads for messages older than the cursor — newer messages were
-    # just enriched above and already have current replies.
+    # at or before the cursor. Scan stored threads for new replies explicitly.
+    # Messages newer than the cursor were just enriched above; the cursor message
+    # itself is refreshed here (exclusive history filter skips re-enrich).
     if oldest:
-        _refresh_old_threads(
+        refreshed = _refresh_old_threads(
             api, channel_id, out_dir, oldest, token=token, attachments_enabled=attachments_enabled
         )
+        if refreshed is not None:
+            archive = refreshed
 
     write_users(out_dir, api.get_user_profiles())
-    _write_sidecars(api, out_dir, channel_id, refresh_workspace=False)
-    write_channel_stats(out_dir, api=api)
+    write_sidecars(api, out_dir, channel_id, refresh_workspace=False)
+    write_channel_stats(out_dir, messages=archive, api=api)
+    # Derive the watermark from the archive after merges and thread refresh.
+    write_cursor_from_messages(out_dir, messages=archive)

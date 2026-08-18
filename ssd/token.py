@@ -1,20 +1,34 @@
+"""Extract Slack tokens and cookies from local Slack client installs."""
+
 import contextlib
 import hashlib
+import importlib.util
+import json
 import re
 import sqlite3
 import subprocess
+import time
+import urllib.request
 from pathlib import Path
+from urllib.parse import quote as _quote
 from urllib.parse import unquote
 
 COOKIES_PATH = Path.home() / "Library/Application Support/Slack/Cookies"
 LEVELDB_PATH = Path.home() / "Library/Application Support/Slack/Local Storage/leveldb"
 
 # Explicit allowlist: xoxb- (bot), xoxc- (client), xoxp- (user OAuth), xoxs- (session).
-# xoxd- is excluded — it's a session cookie, not a bearer token; see extract_cookie().
+# xoxd- is excluded: session cookie, not a bearer token; see extract_cookie().
 # Add new Slack token prefixes here when Slack introduces them.
 _TOKEN_RE = re.compile(rb"(xox[bcps]-[A-Za-z0-9\-]+)")
 # Regex for URL-encoded cookie values (d cookie contains slashes encoded as %2F)
 _COOKIE_RE = re.compile(rb"xoxd-[A-Za-z0-9%\-]+")
+
+
+def _prefer_longer(current: str | None, candidate: str) -> str:
+    """Keep the longer token; Slack scans often find truncated siblings of the real value."""
+    if current is None or len(candidate) > len(current):
+        return candidate
+    return current
 
 
 def _from_slack_cookies() -> str | None:
@@ -22,12 +36,14 @@ def _from_slack_cookies() -> str | None:
     if not COOKIES_PATH.exists():
         return None
     try:
-        with contextlib.closing(sqlite3.connect(f"file:{COOKIES_PATH}?mode=ro", uri=True)) as conn:
+        with contextlib.closing(
+            sqlite3.connect(f"file:{_quote(str(COOKIES_PATH), safe='/')}?mode=ro", uri=True)
+        ) as conn:
             row = conn.execute(
                 "SELECT value FROM cookies WHERE host_key = '.slack.com' AND name = 'd'"
             ).fetchone()
         if row and row[0]:
-            return row[0]
+            return str(row[0])
     except Exception:
         pass
     return None
@@ -38,16 +54,17 @@ def _from_leveldb() -> str | None:
         return None
     try:
         import plyvel
-
+    except ImportError:
+        # Optional extra: uv sync --extra leveldb. Raw .ldb scan still works.
+        return None
+    try:
         db = plyvel.DB(str(LEVELDB_PATH))
         best: str | None = None
         try:
             for _, value in db:
-                m = _TOKEN_RE.search(value)
-                if m:
-                    tok = m.group(1).decode()
-                    if best is None or len(tok) > len(best):
-                        best = tok
+                match = _TOKEN_RE.search(value)
+                if match:
+                    best = _prefer_longer(best, match.group(1).decode())
         finally:
             db.close()
         return best
@@ -64,22 +81,20 @@ def _scan_ldb_dir(ldb_dir: Path) -> str | None:
             continue
         try:
             data = path.read_bytes()
-            for m in _TOKEN_RE.finditer(data):
-                tok = m.group(1).decode()
-                if best is None or len(tok) > len(best):
-                    best = tok
+            for match in _TOKEN_RE.finditer(data):
+                best = _prefer_longer(best, match.group(1).decode())
         except Exception:
             continue
     return best
 
 
 def _from_raw_scan() -> str | None:
-    """Scan Slack desktop app LevelDB for xoxc token."""
+    """Scan Slack desktop app LevelDB for the longest xox[bcps]- token."""
     return _scan_ldb_dir(LEVELDB_PATH) if LEVELDB_PATH.exists() else None
 
 
 def _from_chrome_storage() -> str | None:
-    """Scan Chrome's Slack localStorage LevelDB for xoxc token.
+    """Scan Chrome's Slack localStorage LevelDB for the longest xox[bcps]- token.
 
     Useful when the Slack desktop app isn't installed but Slack is open in Chrome.
     """
@@ -87,6 +102,18 @@ def _from_chrome_storage() -> str | None:
         Path.home() / "Library/Application Support/Google/Chrome/Default/Local Storage/leveldb"
     )
     return _scan_ldb_dir(chrome_ldb) if chrome_ldb.exists() else None
+
+
+def _unpad_pkcs7(padded: bytes) -> bytes | None:
+    """Strip PKCS#7 padding; return None when the pad bytes are not well-formed."""
+    if not padded:
+        return None
+    pad_len = padded[-1]
+    if not (1 <= pad_len <= 16) or len(padded) < pad_len:
+        return None
+    if padded[-pad_len:] != bytes([pad_len]) * pad_len:
+        return None
+    return padded[:-pad_len]
 
 
 def _chrome_d_cookie() -> str | None:
@@ -100,9 +127,11 @@ def _chrome_d_cookie() -> str | None:
     if not chrome_cookies.exists():
         return None
     try:
-        from cryptography.hazmat.backends import default_backend
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
+    except ImportError:
+        # Optional extra: uv sync --extra chrome (AES decrypt for Chrome cookies).
+        return None
+    try:
         key_raw = subprocess.run(
             [
                 "security",
@@ -114,12 +143,13 @@ def _chrome_d_cookie() -> str | None:
                 "Chrome",
             ],
             capture_output=True,
+            check=False,
             timeout=5,
         ).stdout.strip()
         if not key_raw:
             return None
 
-        db_url = f"file:{chrome_cookies}?mode=ro"
+        db_url = f"file:{_quote(str(chrome_cookies), safe='/')}?mode=ro"
         with contextlib.closing(sqlite3.connect(db_url, uri=True)) as conn:
             row = conn.execute(
                 "SELECT encrypted_value FROM cookies WHERE host_key = '.slack.com' AND name = 'd'"
@@ -127,30 +157,43 @@ def _chrome_d_cookie() -> str | None:
         if not row:
             return None
 
-        enc = bytes(row[0])
-        if not enc.startswith(b"v10"):
+        encrypted = bytes(row[0])
+        if not encrypted.startswith(b"v10"):
             return None
 
         key = hashlib.pbkdf2_hmac("sha1", key_raw, b"saltysalt", 1003, 16)
-        cipher = Cipher(algorithms.AES(key), modes.CBC(b" " * 16), backend=default_backend())
-        dec = cipher.decryptor()
-        padded = dec.update(enc[3:]) + dec.finalize()
-        pad_len = padded[-1]
-        plain = padded[:-pad_len] if 1 <= pad_len <= 16 else padded
+        cipher = Cipher(algorithms.AES(key), modes.CBC(b" " * 16))
+        decryptor = cipher.decryptor()
+        padded = decryptor.update(encrypted[3:]) + decryptor.finalize()
+        plain = _unpad_pkcs7(padded)
+        if plain is None:
+            return None
 
-        m = _COOKIE_RE.search(plain)
-        if m:
-            return unquote(m.group(0).decode("ascii"))
+        match = _COOKIE_RE.search(plain)
+        if match:
+            return unquote(match.group(0).decode("ascii"))
     except Exception:
         pass
     return None
 
 
-def extract_token() -> str:
-    """Return the xoxc- client token from the Slack desktop app's LevelDB.
+def missing_optional_extras() -> list[str]:
+    """Return optional extra names whose packages are not importable in this env."""
+    missing: list[str] = []
+    if importlib.util.find_spec("cryptography") is None:
+        missing.append("chrome")
+    if importlib.util.find_spec("plyvel") is None:
+        missing.append("leveldb")
+    return missing
 
-    _from_slack_cookies is NOT included here: it returns xoxd- (a session cookie),
-    not the xoxc- bearer token. xoxd- is handled by extract_cookie().
+
+def extract_token() -> str:
+    """Return the xox[bcps]- bearer token from Slack desktop or Chrome LevelDB.
+
+    Tries Slack app Local Storage (via plyvel), a raw LevelDB file scan, then
+    Chrome's Slack localStorage. ``_from_slack_cookies`` is not used here: it
+    returns xoxd- (a session cookie), not a bearer token. xoxd- is handled by
+    ``extract_cookie()``.
     """
     for method in (_from_leveldb, _from_raw_scan, _from_chrome_storage):
         result = method()
@@ -177,7 +220,7 @@ def _from_firefox_cookies() -> str | None:
         if not cookies_db.exists():
             continue
         try:
-            db_url = f"file:{cookies_db}?mode=ro"
+            db_url = f"file:{_quote(str(cookies_db), safe='/')}?mode=ro"
             with contextlib.closing(sqlite3.connect(db_url, uri=True)) as conn:
                 row = conn.execute(
                     "SELECT value FROM moz_cookies WHERE host LIKE '%slack.com' AND name = 'd'"
@@ -210,15 +253,11 @@ def extract_cookie() -> str | None:
 def validate_auth(token: str, cookie: str | None) -> bool:
     """Return True if the token (and optional cookie) authenticate successfully."""
     try:
-        import json as _json
-        import urllib.request
-        from urllib.parse import quote as _quote
-
         headers: dict[str, str] = {"Authorization": f"Bearer {token}"}
         if cookie:
             headers["Cookie"] = f"d={_quote(cookie, safe='')}"
-        req = urllib.request.Request("https://slack.com/api/auth.test", headers=headers)
-        resp = _json.loads(urllib.request.urlopen(req, timeout=10).read())
+        request = urllib.request.Request("https://slack.com/api/auth.test", headers=headers)
+        resp = json.loads(urllib.request.urlopen(request, timeout=10).read())
         return bool(resp.get("ok"))
     except Exception:
         return False
@@ -231,8 +270,6 @@ def extract_cookie_with_validation(token: str, retries: int = 3, delay: float = 
     This retries extraction up to `retries` times so stale on-disk values are
     not returned as valid.
     """
-    import time
-
     for attempt in range(retries):
         cookie = extract_cookie()
         if cookie and validate_auth(token, cookie):

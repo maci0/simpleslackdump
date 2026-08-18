@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 
 def test_help(invoke):
     result = invoke("--help")
@@ -53,7 +55,7 @@ def test_watch_tty_line(invoke, tmp_path, mocker, monkeypatch):
         [{"ts": "1.0", "user_name": "alice", "text": "hello dump"}]
     )
     mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "watch", "C123")
     assert result.exit_code == 0
     assert "alice" in result.output
@@ -67,7 +69,7 @@ def test_watch_json_flag_on_tty(invoke, tmp_path, mocker, monkeypatch):
         [{"ts": "1.0", "user_name": "alice", "text": "hello dump"}]
     )
     mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "watch", "--json", "C123")
     assert result.exit_code == 0
     data = json.loads(result.output.splitlines()[0])
@@ -103,6 +105,8 @@ def test_watch_from_cursor_rejects_oldest(invoke, tmp_path, mocker):
     mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
     result = invoke("--output", str(tmp_path), "watch", "--from-cursor", "--oldest", "1", "C123")
     assert result.exit_code != 0
+    assert "from-cursor" in result.output
+    assert "oldest" in result.output
     api.watch_messages.assert_not_called()
 
 
@@ -127,7 +131,7 @@ def test_dump_all_prints_progress(invoke, tmp_path, mocker):
     api = mocker.MagicMock()
     api.list_conversations.return_value = [{"id": "C1"}, {"id": "C2"}]
     mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
-    run_dump = mocker.patch("ssd.dump.run_dump")
+    run_dump = mocker.patch("ssd.cli.run_dump")
     result = invoke("--output", str(tmp_path), "dump", "--all")
     assert result.exit_code == 0
     assert "1/2" in result.output
@@ -141,7 +145,7 @@ def test_dump_all_confirm_abort(invoke, tmp_path, mocker):
     api.list_conversations.return_value = [{"id": "C1"}]
     mocker.patch("ssd.cli._should_confirm", return_value=True)
     mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
-    run_dump = mocker.patch("ssd.dump.run_dump")
+    run_dump = mocker.patch("ssd.cli.run_dump")
     result = invoke("--output", str(tmp_path), "dump", "--all", input="n\n")
     assert result.exit_code != 0
     run_dump.assert_not_called()
@@ -152,10 +156,12 @@ def test_dump_all_yes_skips_confirm(invoke, tmp_path, mocker):
     api.list_conversations.return_value = [{"id": "C1"}]
     mocker.patch("ssd.cli._should_confirm", return_value=True)
     mocker.patch("ssd.cli._make_api", return_value=(api, "acme", "tok", False))
-    run_dump = mocker.patch("ssd.dump.run_dump")
+    run_dump = mocker.patch("ssd.cli.run_dump")
     result = invoke("--output", str(tmp_path), "dump", "--all", "--yes")
     assert result.exit_code == 0
     run_dump.assert_called_once()
+    assert run_dump.call_args.args[2] == "C1"
+    assert run_dump.call_args.kwargs.get("refresh_workspace") is True
 
 
 def _graph_dump(tmp_path):
@@ -188,16 +194,41 @@ def test_graph_help_has_open(invoke):
 def test_graph_open_flag(invoke, tmp_path, mocker):
     _graph_dump(tmp_path)
     opened = mocker.patch("ssd.cli.webbrowser.open")
+    out = tmp_path / "g.html"
     result = invoke(
         "--output",
         str(tmp_path),
         "graph",
         "--open",
         "--output",
-        str(tmp_path / "g.html"),
+        str(out),
     )
     assert result.exit_code == 0
-    opened.assert_called_once()
+    opened.assert_called_once_with(f"file://{out.resolve()}")
+
+
+def test_graph_discovers_thread_only_channel_dir(invoke, tmp_path, mocker):
+    mocker.patch("ssd.cli.webbrowser.open")
+    ch = tmp_path / "acme" / "general_C456"
+    td = ch / "thread_2_0"
+    td.mkdir(parents=True)
+    (td / "thread.json").write_text(
+        '[{"ts":"2.0","user":"U1","user_name":"alice","text":"hi",'
+        '"reactions":[],"files":[]}]',
+        encoding="utf-8",
+    )
+    out = tmp_path / "g.html"
+    result = invoke(
+        "--output",
+        str(tmp_path),
+        "graph",
+        "--no-open",
+        "--output",
+        str(out),
+    )
+    assert result.exit_code == 0
+    assert out.is_file()
+    assert "No channel data found" not in result.output
 
 
 def test_help_lists_query(invoke):
@@ -254,12 +285,16 @@ def test_query_ok_false_exits_one(invoke, tmp_path):
 
 def test_query_pretty_json_when_tty(invoke, tmp_path, monkeypatch):
     _query_dump(tmp_path)
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "stats")
     assert result.exit_code == 0
-    assert "\n" in result.output
+    # Pretty mode must indent (compact dumps are a single line).
+    assert result.output.startswith("{\n")
+    assert '\n  "ok"' in result.output or '\n  "ok":' in result.output
     data = json.loads(result.output)
     assert data["ok"] is True
+    assert data["channels"] >= 1
+    assert data["messages"] >= 1
 
 
 def test_query_stats(invoke, tmp_path):
@@ -299,7 +334,7 @@ def test_query_search_table_when_tty(invoke, tmp_path, monkeypatch):
         '"reactions":[],"files":[],"thread":[]}]',
         encoding="utf-8",
     )
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "search", "hello")
     assert result.exit_code == 0
     assert "channel" in result.output.splitlines()[0].lower()
@@ -315,7 +350,7 @@ def test_query_search_json_flag(invoke, tmp_path, monkeypatch):
         '"reactions":[],"files":[],"thread":[]}]',
         encoding="utf-8",
     )
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "--json", "search", "hello")
     assert result.exit_code == 0
     data = json.loads(result.output)
@@ -330,7 +365,7 @@ def test_query_history_table_when_tty(invoke, tmp_path, monkeypatch):
         '"reactions":[],"files":[],"thread":[]}]',
         encoding="utf-8",
     )
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "history", "C123")
     assert result.exit_code == 0
     assert "channel" in result.output.splitlines()[0].lower()
@@ -356,42 +391,26 @@ def test_query_users(invoke, tmp_path):
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["ok"] is True
-    assert any(u["id"] == "U1" for u in data["members"])
+    assert {u["id"] for u in data["members"]} >= {"U1"}
 
 
-def test_query_users_table_when_tty(invoke, tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("subcommand", "marker"),
+    [
+        ("users", "U1"),
+        ("files", "F1"),
+        ("channels", "C123"),
+    ],
+)
+def test_query_list_table_when_tty(invoke, tmp_path, monkeypatch, subcommand, marker):
     _query_dump(tmp_path)
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
-    result = invoke("--output", str(tmp_path), "query", "users")
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
+    result = invoke("--output", str(tmp_path), "query", subcommand)
     assert result.exit_code == 0
     header = result.output.splitlines()[0].lower()
     assert "id" in header
     assert "name" in header
-    assert "U1" in result.output
-    assert not result.output.lstrip().startswith("{")
-
-
-def test_query_files_table_when_tty(invoke, tmp_path, monkeypatch):
-    _query_dump(tmp_path)
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
-    result = invoke("--output", str(tmp_path), "query", "files")
-    assert result.exit_code == 0
-    header = result.output.splitlines()[0].lower()
-    assert "id" in header
-    assert "name" in header
-    assert "F1" in result.output
-    assert not result.output.lstrip().startswith("{")
-
-
-def test_query_channels_table_when_tty(invoke, tmp_path, monkeypatch):
-    _query_dump(tmp_path)
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
-    result = invoke("--output", str(tmp_path), "query", "channels")
-    assert result.exit_code == 0
-    header = result.output.splitlines()[0].lower()
-    assert "id" in header
-    assert "name" in header
-    assert "C123" in result.output
+    assert marker in result.output
     assert not result.output.lstrip().startswith("{")
 
 
@@ -404,7 +423,7 @@ def test_query_replies_table_when_tty(invoke, tmp_path, monkeypatch):
         '"user_name":"b","text":"reply","reactions":[],"files":[]}]}]',
         encoding="utf-8",
     )
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "replies", "C123", "1.0")
     assert result.exit_code == 0
     header = result.output.splitlines()[0].lower()
@@ -423,7 +442,7 @@ def test_query_members_table_when_tty(invoke, tmp_path, monkeypatch):
         '{"U1":{"id":"U1","handle":"alice"},"U2":{"id":"U2","handle":"bob"}}',
         encoding="utf-8",
     )
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "members", "C123")
     assert result.exit_code == 0
     header = result.output.splitlines()[0].lower()
@@ -441,7 +460,7 @@ def test_query_threads_table_when_tty(invoke, tmp_path, monkeypatch):
         '[{"channel":"C123","thread_ts":"1.0","reply_count":2,"latest_reply":"1.2"}]',
         encoding="utf-8",
     )
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "threads", "C123")
     assert result.exit_code == 0
     header = result.output.splitlines()[0].lower()
@@ -456,7 +475,7 @@ def test_query_channels_search_table_when_tty(invoke, tmp_path, monkeypatch):
     (ws / "general_C123" / "messages.json").write_text("[]", encoding="utf-8")
     (ws / "random_C999").mkdir(parents=True)
     (ws / "random_C999" / "messages.json").write_text("[]", encoding="utf-8")
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "channels", "--search", "rand")
     assert result.exit_code == 0
     assert "C999" in result.output
@@ -473,7 +492,7 @@ def test_query_users_search_table_when_tty(invoke, tmp_path, monkeypatch):
         '{"U1":{"id":"U1","handle":"alice"},"U2":{"id":"U2","handle":"bob"}}',
         encoding="utf-8",
     )
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "users", "--search", "alice")
     assert result.exit_code == 0
     assert "U1" in result.output
@@ -483,7 +502,7 @@ def test_query_users_search_table_when_tty(invoke, tmp_path, monkeypatch):
 
 def test_query_files_search_table_when_tty(invoke, tmp_path, monkeypatch):
     _query_dump(tmp_path)
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "files", "--search", "a.txt")
     assert result.exit_code == 0
     assert "F1" in result.output
@@ -498,7 +517,7 @@ def test_query_pins_table_when_tty(invoke, tmp_path, monkeypatch):
         '[{"type":"message","channel":"C123","message":{"ts":"9.0","text":"pin"}}]',
         encoding="utf-8",
     )
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "pins", "C123")
     assert result.exit_code == 0
     header = result.output.splitlines()[0].lower()
@@ -513,7 +532,7 @@ def test_query_stars_table_when_tty(invoke, tmp_path, monkeypatch):
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
     (ws / "stars.json").write_text('[{"type":"message","channel":"C123"}]', encoding="utf-8")
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "stars")
     assert result.exit_code == 0
     header = result.output.splitlines()[0].lower()
@@ -528,7 +547,7 @@ def test_query_emoji_table_when_tty(invoke, tmp_path, monkeypatch):
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
     (ws / "emoji.json").write_text('{"shipit":"https://e.test/s.png"}', encoding="utf-8")
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "emoji")
     assert result.exit_code == 0
     header = result.output.splitlines()[0].lower()
@@ -542,7 +561,7 @@ def test_query_bookmarks_table_when_tty(invoke, tmp_path, monkeypatch):
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
     (ch / "bookmarks.json").write_text('[{"id":"Bk1","title":"docs"}]', encoding="utf-8")
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "bookmarks", "C123")
     assert result.exit_code == 0
     header = result.output.splitlines()[0].lower()
@@ -560,7 +579,7 @@ def test_query_usergroups_table_when_tty(invoke, tmp_path, monkeypatch):
     (ws / "usergroups.json").write_text(
         '[{"id":"S1","handle":"eng","name":"Engineering"}]', encoding="utf-8"
     )
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "usergroups")
     assert result.exit_code == 0
     header = result.output.splitlines()[0].lower()
@@ -575,7 +594,7 @@ def test_query_bots_table_when_tty(invoke, tmp_path, monkeypatch):
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
     (ws / "bots.json").write_text('{"B1":{"id":"B1","name":"deploybot"}}', encoding="utf-8")
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "bots")
     assert result.exit_code == 0
     header = result.output.splitlines()[0].lower()
@@ -593,7 +612,7 @@ def test_query_remote_files_table_when_tty(invoke, tmp_path, monkeypatch):
     (ws / "files.json").write_text(
         '[{"id":"Fext","name":"drive.doc","is_external":true}]', encoding="utf-8"
     )
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "remote-files")
     assert result.exit_code == 0
     header = result.output.splitlines()[0].lower()
@@ -604,7 +623,7 @@ def test_query_remote_files_table_when_tty(invoke, tmp_path, monkeypatch):
 
 def test_query_convos_table_when_tty(invoke, tmp_path, monkeypatch):
     _query_dump(tmp_path)
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "convos", "U1")
     assert result.exit_code == 0
     header = result.output.splitlines()[0].lower()
@@ -622,7 +641,7 @@ def test_query_reactions_table_when_tty(invoke, tmp_path, monkeypatch):
         '"message":{"ts":"1.0","text":"hi"}}]',
         encoding="utf-8",
     )
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "reactions")
     assert result.exit_code == 0
     header = result.output.splitlines()[0].lower()
@@ -639,7 +658,7 @@ def test_query_scheduled_table_when_tty(invoke, tmp_path, monkeypatch):
     (ws / "scheduled_messages.json").write_text(
         '[{"id":"Q1","channel_id":"C123","text":"later"}]', encoding="utf-8"
     )
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "scheduled")
     assert result.exit_code == 0
     assert "Q1" in result.output
@@ -653,7 +672,7 @@ def test_query_reminders_table_when_tty(invoke, tmp_path, monkeypatch):
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
     (ws / "reminders.json").write_text('[{"id":"Rm1","text":"ping"}]', encoding="utf-8")
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "reminders")
     assert result.exit_code == 0
     assert "Rm1" in result.output
@@ -670,7 +689,7 @@ def test_query_comments_table_when_tty(invoke, tmp_path, monkeypatch):
         '"comments":[{"id":"Fc1","comment":"nice","user":"U2"}]}],"thread":[]}]',
         encoding="utf-8",
     )
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "comments", "F1")
     assert result.exit_code == 0
     assert "Fc1" in result.output
@@ -683,7 +702,7 @@ def test_query_calls_table_when_tty(invoke, tmp_path, monkeypatch):
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
     (ch / "calls.json").write_text('[{"id":"R1","name":"standup"}]', encoding="utf-8")
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "calls")
     assert result.exit_code == 0
     assert "R1" in result.output
@@ -697,7 +716,7 @@ def test_query_access_logs_table_when_tty(invoke, tmp_path, monkeypatch):
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
     (ws / "access_logs.json").write_text('[{"user_id":"U1","ip":"9.9.9.9"}]', encoding="utf-8")
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "access-logs")
     assert result.exit_code == 0
     assert "U1" in result.output
@@ -713,7 +732,7 @@ def test_query_integration_logs_table_when_tty(invoke, tmp_path, monkeypatch):
     (ws / "integration_logs.json").write_text(
         '[{"user_id":"U1","service_id":"S1"}]', encoding="utf-8"
     )
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "integration-logs")
     assert result.exit_code == 0
     assert "S1" in result.output
@@ -725,7 +744,7 @@ def test_query_cursors_table_when_tty(invoke, tmp_path, monkeypatch):
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
     (ch / ".cursor").write_text("9.0", encoding="utf-8")
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "cursor")
     assert result.exit_code == 0
     assert "C123" in result.output
@@ -739,7 +758,7 @@ def test_query_teams_table_when_tty(invoke, tmp_path, monkeypatch):
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
     (ws / "teams.json").write_text('[{"id":"T1","name":"Acme"}]', encoding="utf-8")
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "teams")
     assert result.exit_code == 0
     assert "T1" in result.output
@@ -753,7 +772,7 @@ def test_query_presence_all_table_when_tty(invoke, tmp_path, monkeypatch):
     ch.mkdir(parents=True)
     (ch / "messages.json").write_text("[]", encoding="utf-8")
     (ws / "presence.json").write_text('{"U8":{"presence":"active"}}', encoding="utf-8")
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "presence", "--all")
     assert result.exit_code == 0
     assert "U8" in result.output
@@ -770,7 +789,7 @@ def test_query_usergroup_users_table_when_tty(invoke, tmp_path, monkeypatch):
         '[{"id":"S1","handle":"eng","users":["U1"]}]', encoding="utf-8"
     )
     (ws / "users.json").write_text('{"U1":{"id":"U1","handle":"alice"}}', encoding="utf-8")
-    monkeypatch.setattr("ssd.cli._json_pretty", lambda: True)
+    monkeypatch.setattr("ssd.cli_format._json_pretty", lambda: True)
     result = invoke("--output", str(tmp_path), "query", "usergroup-users", "eng")
     assert result.exit_code == 0
     assert "U1" in result.output
@@ -1073,6 +1092,41 @@ def test_query_api(invoke, tmp_path):
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["messages"][0]["text"] == "hi"
+
+
+def test_query_api_coerces_limit_and_bool(invoke, tmp_path):
+    ch = tmp_path / "acme" / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text(
+        '[{"ts":"1.0","user":"U1","user_name":"a","text":"hi",'
+        '"reactions":[],"files":[],"thread":[]},'
+        '{"ts":"2.0","user":"U1","user_name":"a","text":"bye",'
+        '"reactions":[],"files":[],"thread":[]}]',
+        encoding="utf-8",
+    )
+    limited = invoke(
+        "--output",
+        str(tmp_path),
+        "query",
+        "api",
+        "conversations.history",
+        "channel=C123",
+        "limit=1",
+    )
+    assert limited.exit_code == 0
+    assert len(json.loads(limited.output)["messages"]) == 1
+    exclusive = invoke(
+        "--output",
+        str(tmp_path),
+        "query",
+        "api",
+        "conversations.history",
+        "channel=C123",
+        "oldest=1.0",
+        "inclusive=false",
+    )
+    assert exclusive.exit_code == 0
+    assert [m["ts"] for m in json.loads(exclusive.output)["messages"]] == ["2.0"]
 
 
 def test_query_bookmarks(invoke, tmp_path):
@@ -3220,3 +3274,163 @@ def test_query_convos_search(invoke, tmp_path):
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert [c["id"] for c in data["channels"]] == ["C456"]
+
+
+# --- cli_format unit tests ---
+
+
+def test_cell_truncates_long_text():
+    from ssd.cli_format import _cell
+
+    long = "a" * 100
+    result = _cell(long, 20)
+    assert len(result) == 20
+    assert result.endswith("...")
+
+
+def test_cell_pads_short_text():
+    from ssd.cli_format import _cell
+
+    result = _cell("hi", 10)
+    assert len(result) == 10
+    assert result == "hi        "
+
+
+def test_cell_collapses_whitespace():
+    from ssd.cli_format import _cell
+
+    result = _cell("foo   bar\nbaz", 20)
+    assert "  " not in result.rstrip()
+    assert "foo bar baz" in result
+
+
+def test_print_json_exits_nonzero_on_error(monkeypatch):
+    """print_json raises SystemExit(1) when the response payload has ok=False."""
+    import pytest
+
+    from ssd.cli_format import print_json
+
+    monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+    with pytest.raises(SystemExit) as exc:
+        print_json({"ok": False, "error": "not_authed"})
+    assert exc.value.code == 1
+
+
+def test_print_json_ok_true_does_not_exit(monkeypatch, capsys):
+    from ssd.cli_format import print_json
+
+    monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+    print_json({"ok": True, "channels": []})
+    assert json.loads(capsys.readouterr().out) == {"ok": True, "channels": []}
+
+
+def test_write_secret_creates_mode_600(tmp_path):
+    """Credentials must never be world-readable, even briefly."""
+    import os
+    import stat
+
+    from ssd.cli import _write_secret
+
+    path = tmp_path / ".token"
+    # Existing looser perms must be tightened on rewrite.
+    path.write_text("stale", encoding="utf-8")
+    os.chmod(path, 0o644)
+    _write_secret(path, "xoxc-secret")
+    assert path.read_text(encoding="utf-8") == "xoxc-secret"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_query_info_wins_over_search_for_bots(invoke, tmp_path):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "bots.json").write_text(
+        '[{"id":"B1","name":"helper"},{"id":"B2","name":"other"}]',
+        encoding="utf-8",
+    )
+    result = invoke("--output", str(tmp_path), "query", "bots", "B1", "--search", "other")
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["bot"]["id"] == "B1"
+
+
+def test_query_users_search_respects_no_bots(invoke, tmp_path):
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    (ws / "users.json").write_text(
+        json.dumps(
+            {
+                "U1": {"id": "U1", "handle": "alice", "display_name": "alice", "is_bot": False},
+                "UB": {
+                    "id": "UB",
+                    "handle": "alicebot",
+                    "display_name": "alicebot",
+                    "is_bot": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = invoke("--output", str(tmp_path), "query", "users", "--search", "alice", "--no-bots")
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert [u["id"] for u in data["members"]] == ["U1"]
+
+
+def test_config_output_dir_and_token_file(invoke, tmp_path, monkeypatch):
+    out = tmp_path / "elsewhere"
+    cfg = tmp_path / "ssd.toml"
+    cfg.write_text(
+        "[settings]\n"
+        f'output_dir = "{out.as_posix()}"\n'
+        'token_file = "secret.tok"\n'
+        "attachments = false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ssd.token.extract_token", lambda: "xoxc-from-config")
+    monkeypatch.setattr("ssd.token.extract_cookie_with_validation", lambda *_a, **_k: None)
+    result = invoke("--config", str(cfg), "token")
+    assert result.exit_code == 0
+    assert (out / "secret.tok").read_text().strip() == "xoxc-from-config"
+    assert not (tmp_path / "output" / ".token").exists()
+
+
+def test_token_file_rejects_path_escape(invoke, tmp_path, monkeypatch):
+    """token_file must stay a single name under output_dir (no abs / .. / nested)."""
+    out = tmp_path / "dump"
+    out.mkdir()
+    outside = tmp_path / "stolen.token"
+    cfg = tmp_path / "ssd.toml"
+    # Absolute path would otherwise replace Path(output) entirely.
+    cfg.write_text(
+        "[settings]\n"
+        f'output_dir = "{out.as_posix()}"\n'
+        f'token_file = "{outside.as_posix()}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ssd.token.extract_token", lambda: "xoxc-should-not-write")
+    monkeypatch.setattr("ssd.token.extract_cookie_with_validation", lambda *_a, **_k: None)
+    result = invoke("--config", str(cfg), "token")
+    assert result.exit_code != 0
+    assert "token_file" in result.output or "token_file" in result.stderr
+    assert not outside.exists()
+
+    cfg.write_text(
+        "[settings]\n"
+        f'output_dir = "{out.as_posix()}"\n'
+        'token_file = "../escaped.token"\n',
+        encoding="utf-8",
+    )
+    result = invoke("--config", str(cfg), "token")
+    assert result.exit_code != 0
+    assert not (tmp_path / "escaped.token").exists()
+
+
+def test_token_path_helper_accepts_plain_filename(tmp_path):
+    from ssd.cli import _token_path
+
+    assert _token_path(tmp_path, ".token") == tmp_path / ".token"
+    assert _token_path(tmp_path, "secret.tok") == tmp_path / "secret.tok"

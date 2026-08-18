@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -153,6 +154,32 @@ def test_conversations_list_from_output_root(dump_root: Path) -> None:
     assert by_id["C456"]["name"] == "team_ops"
 
 
+def test_discover_prefers_dump_with_messages_on_duplicate_id(tmp_path: Path) -> None:
+    """If a rename left two dirs for one id, keep the archive that has messages."""
+    ws = tmp_path / "acme"
+    empty = ws / "renamed_C123"
+    empty.mkdir(parents=True)
+    full = ws / "general_C123"
+    _write(
+        full / "messages.json",
+        [
+            {
+                "ts": "1.0",
+                "user": "U1",
+                "user_name": "alice",
+                "text": "kept",
+                "reactions": [],
+                "files": [],
+                "thread": [],
+            }
+        ],
+    )
+    client = DumpClient(tmp_path)
+    hist = client.conversations_history(channel="C123")
+    assert [m["text"] for m in hist["messages"]] == ["kept"]
+    assert client.conversations_info(channel="C123")["channel"]["name"] == "general"
+
+
 def test_conversations_list_includes_im_by_default(tmp_path: Path) -> None:
     dm = tmp_path / "acme" / "alice_D111"
     _write(
@@ -282,6 +309,70 @@ def test_standalone_thread_parent_in_history(tmp_path: Path) -> None:
     assert [m["text"] for m in hist["messages"]] == ["root"]
     replies = client.conversations_replies(channel="C123", ts="1.0")
     assert [m["text"] for m in replies["messages"]] == ["root", "reply"]
+
+
+def test_thread_dump_merges_into_existing_parent(tmp_path: Path) -> None:
+    """Standalone thread dumps must not be ignored when the parent is in messages.json."""
+    ch = tmp_path / "acme" / "general_C123"
+    _write(
+        ch / "messages.json",
+        [
+            {
+                "ts": "1.0",
+                "user": "U1",
+                "user_name": "alice",
+                "text": "root",
+                "reactions": [],
+                "files": [],
+                "thread": [
+                    {
+                        "ts": "1.1",
+                        "user": "U2",
+                        "user_name": "bob",
+                        "text": "old reply",
+                        "reactions": [],
+                        "files": [],
+                    }
+                ],
+            }
+        ],
+    )
+    _write(
+        ch / "thread_1_0" / "thread.json",
+        [
+            {
+                "ts": "1.0",
+                "user": "U1",
+                "user_name": "alice",
+                "text": "root",
+                "reactions": [],
+                "files": [],
+            },
+            {
+                "ts": "1.1",
+                "user": "U2",
+                "user_name": "bob",
+                "text": "old reply updated",
+                "reactions": [],
+                "files": [],
+            },
+            {
+                "ts": "1.2",
+                "user": "U3",
+                "user_name": "carol",
+                "text": "newer reply only in thread dump",
+                "reactions": [],
+                "files": [],
+            },
+        ],
+    )
+    client = DumpClient(tmp_path)
+    replies = client.conversations_replies(channel="C123", ts="1.0")
+    assert [m["ts"] for m in replies["messages"]] == ["1.0", "1.1", "1.2"]
+    assert replies["messages"][1]["text"] == "old reply updated"
+    assert replies["messages"][2]["text"] == "newer reply only in thread dump"
+    hits = client.search_messages(query="newer reply only")["messages"]["matches"]
+    assert [m["ts"] for m in hits] == ["1.2"]
 
 
 def test_search_matches_text_raw(tmp_path: Path) -> None:
@@ -670,6 +761,51 @@ def test_search_before_after(dump_root: Path) -> None:
     assert [m["text"] for m in before["messages"]["matches"]] == ["hello @bob"]
 
 
+def test_search_invalid_after_before_fail_closed(tmp_path: Path) -> None:
+    """Junk after:/before: tokens must not widen the result set (match on:/during:)."""
+    ch = tmp_path / "acme" / "general_C123"
+    _write(
+        ch / "messages.json",
+        [
+            {
+                "ts": "100.0",
+                "user": "U1",
+                "user_name": "alice",
+                "text": "hello",
+                "reactions": [],
+                "files": [],
+                "thread": [],
+            },
+        ],
+    )
+    client = DumpClient(tmp_path)
+    assert client.search_messages(query="after:not-a-date hello")["messages"]["matches"] == []
+    assert client.search_messages(query="before:not-a-date hello")["messages"]["matches"] == []
+    assert client.search_messages(query="on:not-a-date hello")["messages"]["matches"] == []
+
+
+def test_search_before_today_and_after_yesterday(tmp_path: Path, monkeypatch) -> None:
+    """before:/after: with natural-language keywords route through parse_bound._day_start."""
+    _freeze_search_now(monkeypatch)
+    _write(
+        (tmp_path / "acme" / "general_C123") / "messages.json",
+        [
+            _msg(_noon_ts(0), "today ping"),
+            _msg(_noon_ts(1), "yesterday ping"),
+            _msg(_noon_ts(3), "old ping"),
+        ],
+    )
+    client = DumpClient(tmp_path)
+    before_today = client.search_messages(query="before:today ping")["messages"]["matches"]
+    assert {m["text"] for m in before_today} == {"yesterday ping", "old ping"}
+
+    after_today = client.search_messages(query="after:today ping")["messages"]["matches"]
+    assert {m["text"] for m in after_today} == {"today ping"}
+
+    after_yesterday = client.search_messages(query="after:yesterday ping")["messages"]["matches"]
+    assert {m["text"] for m in after_yesterday} == {"today ping", "yesterday ping"}
+
+
 def test_search_has_link(tmp_path: Path) -> None:
     ch = tmp_path / "acme" / "general_C123"
     _write(
@@ -886,6 +1022,84 @@ def test_iter_threads(dump_root: Path) -> None:
     assert "5.000000" in by_ts
     only_ops = list(client.iter_threads(channel="C456"))
     assert only_ops == []
+
+
+def test_history_and_threads_keep_claimed_reply_meta(tmp_path: Path) -> None:
+    """Partial dumps must not report reply_count = len(thread) when Slack claimed more."""
+    ch = tmp_path / "acme" / "general_C123"
+    _write(
+        ch / "messages.json",
+        [
+            {
+                "ts": "1.0",
+                "user": "U1",
+                "user_name": "alice",
+                "text": "parent",
+                "reactions": [],
+                "files": [],
+                "reply_count": 5,
+                "latest_reply": "1.5",
+                "thread": [
+                    {
+                        "ts": "1.2",
+                        "user": "U2",
+                        "user_name": "bob",
+                        "text": "later stored",
+                        "reactions": [],
+                        "files": [],
+                    },
+                    {
+                        "ts": "1.1",
+                        "user": "U3",
+                        "user_name": "carol",
+                        "text": "earlier stored",
+                        "reactions": [],
+                        "files": [],
+                    },
+                ],
+            }
+        ],
+    )
+    client = DumpClient(tmp_path)
+    hist = client.conversations_history(channel="C123")
+    assert hist["messages"][0]["reply_count"] == 5
+    assert hist["messages"][0]["latest_reply"] == "1.5"
+    assert "thread" not in hist["messages"][0]
+    rows = list(client.iter_threads(channel="C123"))
+    assert rows[0]["reply_count"] == 5
+    assert rows[0]["latest_reply"] == "1.5"
+
+
+def test_iter_threads_includes_claimed_without_stored_replies(tmp_path: Path) -> None:
+    ch = tmp_path / "acme" / "general_C123"
+    _write(
+        ch / "messages.json",
+        [
+            {
+                "ts": "9.0",
+                "user": "U1",
+                "user_name": "alice",
+                "text": "root",
+                "reactions": [],
+                "files": [],
+                "reply_count": 2,
+                "latest_reply": "9.2",
+                "thread": [],
+            }
+        ],
+    )
+    client = DumpClient(tmp_path)
+    rows = list(client.iter_threads())
+    assert rows == [
+        {
+            "channel": "C123",
+            "thread_ts": "9.0",
+            "reply_count": 2,
+            "latest_reply": "9.2",
+            "reply_users": [],
+            "reply_users_count": 0,
+        }
+    ]
 
 
 def test_files_list_ts_range(tmp_path: Path) -> None:
@@ -1413,6 +1627,42 @@ def test_flat_thread_ts_in_messages_json(tmp_path: Path) -> None:
     assert [m["text"] for m in replies["messages"]] == ["root", "reply"]
 
 
+def test_flat_thread_ts_merges_into_parent_for_threads_list(tmp_path: Path) -> None:
+    """Export-style loose replies must nest under the parent, not duplicate threads_list."""
+    ch = tmp_path / "acme" / "general_C123"
+    _write(
+        ch / "messages.json",
+        [
+            {
+                "ts": "1.0",
+                "user": "U1",
+                "user_name": "alice",
+                "text": "root",
+                "type": "message",
+                "reply_count": 1,
+                "thread_ts": "1.0",
+                "latest_reply": "",
+            },
+            {
+                "ts": "1.1",
+                "user": "U2",
+                "user_name": "bob",
+                "text": "reply",
+                "type": "message",
+                "thread_ts": "1.0",
+            },
+        ],
+    )
+    client = DumpClient(tmp_path)
+    rows = list(client.iter_threads(channel="C123"))
+    assert len(rows) == 1
+    assert rows[0]["thread_ts"] == "1.0"
+    assert rows[0]["latest_reply"] == "1.1"
+    info = client.threads_info(channel="C123", ts="1.0")
+    assert info["ok"] is True
+    assert info["thread"]["latest_reply"] == "1.1"
+
+
 def test_search_has_attachment(tmp_path: Path) -> None:
     ch = tmp_path / "acme" / "general_C123"
     _write(
@@ -1459,6 +1709,96 @@ def test_conversations_list_exclude_archived(tmp_path: Path) -> None:
     assert all_ch == {"C123", "C999"}
     live = {c["id"] for c in client.conversations_list(exclude_archived=True)["channels"]}
     assert live == {"C123"}
+
+
+def test_conversations_list_types_respect_channel_meta(tmp_path: Path) -> None:
+    """Type filters must follow channel.json flags, not prefix-only kinds."""
+    ws = tmp_path / "acme"
+    pub = ws / "general_C111"
+    priv = ws / "secret_C222"
+    mpim = ws / "mpdm_G333"
+    group = ws / "closed_G444"
+    for path in (pub, priv, mpim, group):
+        path.mkdir(parents=True)
+        _write(path / "messages.json", [])
+    _write(
+        pub / "channel.json",
+        {
+            "id": "C111",
+            "name": "general",
+            "is_channel": True,
+            "is_private": False,
+            "is_mpim": False,
+            "is_group": False,
+            "is_im": False,
+        },
+    )
+    _write(
+        priv / "channel.json",
+        {
+            "id": "C222",
+            "name": "secret",
+            "is_channel": True,
+            "is_private": True,
+            "is_mpim": False,
+            "is_group": False,
+            "is_im": False,
+        },
+    )
+    _write(
+        mpim / "channel.json",
+        {
+            "id": "G333",
+            "name": "mpdm",
+            "is_channel": False,
+            "is_private": True,
+            "is_mpim": True,
+            "is_group": True,
+            "is_im": False,
+        },
+    )
+    _write(
+        group / "channel.json",
+        {
+            "id": "G444",
+            "name": "closed",
+            "is_channel": False,
+            "is_private": True,
+            "is_mpim": False,
+            "is_group": True,
+            "is_im": False,
+        },
+    )
+    client = DumpClient(tmp_path)
+    assert {c["id"] for c in client.conversations_list(types="public_channel")["channels"]} == {
+        "C111"
+    }
+    assert {c["id"] for c in client.conversations_list(types="private_channel")["channels"]} == {
+        "C222",
+        "G444",
+    }
+    assert {c["id"] for c in client.conversations_list(types="mpim")["channels"]} == {"G333"}
+
+
+def test_channel_obj_flags_follow_kinds_when_meta_omits_is_mpim(tmp_path: Path) -> None:
+    """G private groups must not keep prefix is_mpim=true when kinds say private_channel."""
+    ws = tmp_path / "acme"
+    group = ws / "closed_G444"
+    group.mkdir(parents=True)
+    _write(group / "messages.json", [])
+    # Catalog classifies as private group but omits is_mpim (common thin export).
+    _write(
+        ws / "conversations.json",
+        [{"id": "G444", "name": "closed", "is_group": True, "is_private": True}],
+    )
+    client = DumpClient(tmp_path)
+    info = client.conversations_info(channel="G444")["channel"]
+    assert info["is_mpim"] is False
+    assert info["is_group"] is True
+    assert info["is_private"] is True
+    start = client.rtm_start()
+    assert [c["id"] for c in start["mpims"]] == []
+    assert [c["id"] for c in start["groups"]] == ["G444"]
 
 
 def test_team_info_from_sidecar(tmp_path: Path) -> None:
@@ -1565,7 +1905,7 @@ def test_im_replies_alias(dump_root: Path) -> None:
     client = DumpClient(dump_root)
     resp = client.im_replies(channel="C123", ts="2.0")
     assert resp["ok"] is True
-    assert [m["text"] for m in resp["messages"]][0] == "thread root"
+    assert next(m["text"] for m in resp["messages"]) == "thread root"
 
 
 def test_api_test(tmp_path: Path) -> None:
@@ -1835,6 +2175,38 @@ def test_search_from_me(tmp_path: Path) -> None:
     assert [m["text"] for m in resp["messages"]["matches"]] == ["mine"]
 
 
+def test_expand_me_sentinel_and_auth_expansion() -> None:
+    """expand_me: unknown auth yields NUL sentinel; known auth yields id + name."""
+    from ssd.dumpsearch import expand_me
+
+    assert expand_me(["me"], {}) == ["\0"]
+    assert expand_me(["me", "bob"], {}) == ["\0", "bob"]
+    assert expand_me(["me"], {"user_id": "U1", "user": "alice"}) == ["U1", "alice"]
+    assert expand_me(["@me"], {"user_id": "U1", "user": "alice"}) == ["U1", "alice"]
+
+
+def test_search_from_me_without_auth_matches_nothing(tmp_path: Path) -> None:
+    """from:me must fail closed when auth.json has no user identity."""
+    _write(
+        (tmp_path / "acme" / "general_C123") / "messages.json",
+        [
+            {
+                "ts": "1.0",
+                "user": "U1",
+                "user_name": "alice",
+                "text": "mine",
+                "reactions": [],
+                "files": [],
+                "thread": [],
+            },
+        ],
+    )
+    client = DumpClient(tmp_path)
+    resp = client.search_messages(query="from:me")
+    assert resp["messages"]["matches"] == []
+    assert resp["messages"]["total"] == 0
+
+
 def test_search_to_me(tmp_path: Path) -> None:
     _write(
         (tmp_path / "acme" / "general_C123") / "messages.json",
@@ -1865,13 +2237,14 @@ def test_search_to_me(tmp_path: Path) -> None:
     assert [m["text"] for m in resp["messages"]["matches"]] == ["hey @alice"]
 
 
-def test_search_is_starred(dump_root: Path) -> None:
+@pytest.mark.parametrize("query", ["is:starred", "has:star"])
+def test_search_star_aliases(dump_root: Path, query: str) -> None:
     _write(
         dump_root / "acme" / "stars.json",
         [{"type": "message", "channel": "C123", "message": {"ts": "1.0"}}],
     )
     client = DumpClient(dump_root)
-    texts = {m["text"] for m in client.search_messages(query="is:starred")["messages"]["matches"]}
+    texts = {m["text"] for m in client.search_messages(query=query)["messages"]["matches"]}
     assert texts == {"hello @bob"}
 
 
@@ -1984,6 +2357,80 @@ def test_search_on_date(tmp_path: Path) -> None:
     assert [m["text"] for m in resp["messages"]["matches"]] == ["on day"]
 
 
+def test_search_multiple_on_windows_are_or(tmp_path: Path) -> None:
+    """Exclusive day windows must OR; AND would match nothing."""
+    _write(
+        (tmp_path / "acme" / "general_C123") / "messages.json",
+        [
+            {
+                "ts": "1717200000.0",  # 2024-06-01
+                "user": "U1",
+                "user_name": "alice",
+                "text": "day one",
+                "reactions": [],
+                "files": [],
+                "thread": [],
+            },
+            {
+                "ts": "1717344000.0",  # 2024-06-02
+                "user": "U1",
+                "user_name": "alice",
+                "text": "day two",
+                "reactions": [],
+                "files": [],
+                "thread": [],
+            },
+            {
+                "ts": "1717430400.0",  # 2024-06-03
+                "user": "U1",
+                "user_name": "alice",
+                "text": "day three",
+                "reactions": [],
+                "files": [],
+                "thread": [],
+            },
+        ],
+    )
+    client = DumpClient(tmp_path)
+    texts = {
+        m["text"]
+        for m in client.search_messages(query="on:2024-06-01 on:2024-06-02")["messages"]["matches"]
+    }
+    assert texts == {"day one", "day two"}
+
+
+def test_search_after_bound_preserves_microseconds(tmp_path: Path) -> None:
+    """after:/before: must use Decimal bounds; float collapses these timestamps."""
+    lo, hi = "9999999999.000001", "9999999999.000002"
+    assert float(lo) == float(hi)
+    _write(
+        (tmp_path / "acme" / "general_C123") / "messages.json",
+        [
+            {
+                "ts": lo,
+                "user": "U1",
+                "user_name": "alice",
+                "text": "first",
+                "reactions": [],
+                "files": [],
+                "thread": [],
+            },
+            {
+                "ts": hi,
+                "user": "U1",
+                "user_name": "alice",
+                "text": "second",
+                "reactions": [],
+                "files": [],
+                "thread": [],
+            },
+        ],
+    )
+    client = DumpClient(tmp_path)
+    texts = [m["text"] for m in client.search_messages(query=f"after:{lo}")["messages"]["matches"]]
+    assert texts == ["second"]
+
+
 def test_search_negation(tmp_path: Path) -> None:
     _write(
         (tmp_path / "acme" / "general_C123") / "messages.json",
@@ -2013,14 +2460,36 @@ def test_search_negation(tmp_path: Path) -> None:
     assert [m["text"] for m in resp["messages"]["matches"]] == ["alpha keep"]
 
 
-def test_search_has_star(dump_root: Path) -> None:
+def test_search_files_negation(tmp_path: Path) -> None:
+    ch = tmp_path / "acme" / "general_C123"
+    ch.mkdir(parents=True)
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
     _write(
-        dump_root / "acme" / "stars.json",
-        [{"type": "message", "channel": "C123", "message": {"ts": "1.0"}}],
+        tmp_path / "acme" / "files.json",
+        [
+            {
+                "id": "F1",
+                "name": "report.pdf",
+                "title": "report",
+                "filetype": "pdf",
+                "mimetype": "application/pdf",
+                "user": "U1",
+                "created": 1,
+            },
+            {
+                "id": "F2",
+                "name": "draft-report.pdf",
+                "title": "draft report",
+                "filetype": "pdf",
+                "mimetype": "application/pdf",
+                "user": "U1",
+                "created": 2,
+            },
+        ],
     )
-    client = DumpClient(dump_root)
-    texts = {m["text"] for m in client.search_messages(query="has:star")["messages"]["matches"]}
-    assert texts == {"hello @bob"}
+    client = DumpClient(tmp_path)
+    hits = [f["id"] for f in client.search_files(query="report -draft")["files"]["matches"]]
+    assert hits == ["F1"]
 
 
 def test_search_messages_page(tmp_path: Path) -> None:
@@ -2050,6 +2519,32 @@ def test_search_messages_page(tmp_path: Path) -> None:
     client = DumpClient(tmp_path)
     page2 = client.search_messages(query="hit", count=1, page=2)
     assert [m["text"] for m in page2["messages"]["matches"]] == ["hit one"]
+
+
+def test_search_messages_page_beyond_window_returns_empty(tmp_path: Path) -> None:
+    """Pages past ``_MAX_SEARCH_NEED`` must not allocate a huge heap."""
+    from ssd import dumpapi as dumpapi_mod
+
+    _write(
+        (tmp_path / "acme" / "general_C123") / "messages.json",
+        [
+            {
+                "ts": "1.0",
+                "user": "U1",
+                "user_name": "alice",
+                "text": "hit",
+                "reactions": [],
+                "files": [],
+                "thread": [],
+            },
+        ],
+    )
+    client = DumpClient(tmp_path)
+    # page such that start == _MAX_SEARCH_NEED with count=1
+    page = dumpapi_mod._MAX_SEARCH_NEED + 1
+    resp = client.search_messages(query="hit", count=1, page=page)
+    assert resp["messages"]["total"] == 1
+    assert resp["messages"]["matches"] == []
 
 
 def test_migration_exchange(tmp_path: Path) -> None:
@@ -2085,8 +2580,7 @@ def test_users_conversations_exclude_archived(tmp_path: Path) -> None:
     all_ch = {c["id"] for c in client.users_conversations(user="U1")["channels"]}
     assert all_ch == {"C123", "C999"}
     live = {
-        c["id"]
-        for c in client.users_conversations(user="U1", exclude_archived=True)["channels"]
+        c["id"] for c in client.users_conversations(user="U1", exclude_archived=True)["channels"]
     }
     assert live == {"C123"}
 
@@ -2199,10 +2693,33 @@ def test_stats_from_channel_sidecar(tmp_path: Path) -> None:
     assert resp["users"] == 1
 
 
-def _noon_ts(days_ago: int) -> str:
-    from datetime import UTC, datetime, timedelta
+def _FIXED_SEARCH_NOW():
+    from datetime import UTC, datetime
 
-    noon = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
+    # Saturday 2024-06-15 noon UTC; weekday()==5 so lastweek/lastmonth math is stable.
+    return datetime(2024, 6, 15, 12, 0, 0, tzinfo=UTC)
+
+
+def _freeze_search_now(monkeypatch, when=None):
+    """Pin ssd.dumpsearch.datetime.now so relative day/week/month filters are deterministic."""
+    from datetime import datetime
+
+    when = when or _FIXED_SEARCH_NOW()
+
+    class _FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return when
+
+    monkeypatch.setattr("ssd.dumpsearch.datetime", _FrozenDateTime)
+    return when
+
+
+def _noon_ts(days_ago: int, now=None) -> str:
+    from datetime import timedelta
+
+    now = now or _FIXED_SEARCH_NOW()
+    noon = now.replace(hour=12, minute=0, second=0, microsecond=0)
     return str((noon - timedelta(days=days_ago)).timestamp())
 
 
@@ -2218,7 +2735,254 @@ def _msg(ts: str, text: str) -> dict:
     }
 
 
-def test_search_after_yesterday(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("msg_query", "file_query", "hit_text", "hit_file"),
+    [
+        ("has:space", "has:space", "post", {"id": "Fp", "name": "doc", "filetype": "space"}),
+        ("has:email", "has:email", "mail", {"id": "Fe", "name": "note.eml", "filetype": "email"}),
+        ("has:pdf", "has:pdf", "doc", {"id": "Fpdf", "name": "a.pdf", "filetype": "pdf"}),
+        (
+            "has:spreadsheet",
+            "has:spreadsheet",
+            "sheet",
+            {"id": "Fx", "name": "a.xlsx", "filetype": "xlsx"},
+        ),
+        ("has:zip", "has:zip", "zip", {"id": "Fz", "name": "a.zip", "filetype": "zip"}),
+        (
+            "has:presentation",
+            "has:presentation",
+            "deck",
+            {"id": "Fp", "name": "talk.pptx", "filetype": "pptx"},
+        ),
+        ("has:list", "has:list", "listed", {"id": "Fl", "name": "tasks", "filetype": "list"}),
+        ("has:doc", "has:doc", "doc", {"id": "Fd", "name": "spec.docx", "filetype": "docx"}),
+        ("has:txt", "has:txt", "note", {"id": "Ft", "name": "notes.txt", "filetype": "text"}),
+        ("has:gif", "has:gif", "gif", {"id": "Fg", "name": "loop.gif", "filetype": "gif"}),
+        ("has:json", "has:json", "blob", {"id": "Fj", "name": "data.json", "filetype": "json"}),
+        ("has:csv", "has:csv", "sheet", {"id": "Fc", "name": "data.csv", "filetype": "csv"}),
+        ("has:xml", "has:xml", "blob", {"id": "Fx", "name": "data.xml", "filetype": "xml"}),
+        ("has:md", "has:markdown", "doc", {"id": "Fm", "name": "notes.md", "filetype": "markdown"}),
+        ("has:yaml", "has:yml", "blob", {"id": "Fy", "name": "data.yaml", "filetype": "yaml"}),
+        (
+            "has:toml",
+            "has:toml",
+            "blob",
+            {"id": "Ft", "name": "pyproject.toml", "filetype": "toml"},
+        ),
+        ("has:python", "has:py", "script", {"id": "Fp", "name": "app.py", "filetype": "python"}),
+        ("has:video", "has:video", "clip", {"id": "Fv", "name": "a.mp4", "filetype": "mp4", "mimetype": "video/mp4"}),
+        ("has:audio", "has:audio", "sound", {"id": "Fa", "name": "a.mp3", "filetype": "mp3", "mimetype": "audio/mpeg"}),
+    ],
+    ids=[
+        "space",
+        "email",
+        "pdf",
+        "spreadsheet",
+        "zip",
+        "presentation",
+        "list",
+        "doc",
+        "txt",
+        "gif",
+        "json",
+        "csv",
+        "xml",
+        "md",
+        "yaml",
+        "toml",
+        "python",
+        "video",
+        "audio",
+    ],
+)
+def test_search_has_file_kind(
+    tmp_path: Path,
+    msg_query: str,
+    file_query: str,
+    hit_text: str,
+    hit_file: dict,
+) -> None:
+    hit = _msg("1.0", hit_text)
+    hit["files"] = [hit_file]
+    pic = _msg("2.0", "pic")
+    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
+    _write((tmp_path / "acme" / "general_C123") / "messages.json", [hit, pic])
+    client = DumpClient(tmp_path)
+    hits = client.search_messages(query=msg_query)["messages"]["matches"]
+    assert [m["text"] for m in hits] == [hit_text]
+    files = client.search_files(query=file_query)["files"]["matches"]
+    assert [f["id"] for f in files] == [hit_file["id"]]
+
+
+@pytest.mark.parametrize(
+    ("query", "hit", "miss", "hit_dir", "miss_dir"),
+    [
+        (
+            "is:org_shared hello",
+            {"id": "C123", "name": "grid", "is_channel": True, "is_org_shared": True},
+            {"id": "C999", "name": "local", "is_channel": True, "is_org_shared": False},
+            "grid_C123",
+            "local_C999",
+        ),  # org_shared
+        (
+            "is:archived hello",
+            {"id": "C123", "name": "old", "is_channel": True, "is_archived": True},
+            {"id": "C999", "name": "live", "is_channel": True, "is_archived": False},
+            "old_C123",
+            "live_C999",
+        ),  # archived
+        (
+            "is:frozen hello",
+            {"id": "C123", "name": "ice", "is_channel": True, "is_frozen": True},
+            {"id": "C999", "name": "live", "is_channel": True, "is_frozen": False},
+            "ice_C123",
+            "live_C999",
+        ),  # frozen
+        (
+            "is:muted hello",
+            {"id": "C123", "name": "quiet", "is_channel": True, "is_muted": True},
+            {"id": "C999", "name": "loud", "is_channel": True, "is_muted": False},
+            "quiet_C123",
+            "loud_C999",
+        ),  # muted
+        (
+            "is:open hello",
+            {"id": "D123", "name": "dm", "is_im": True, "is_open": True},
+            {"id": "D999", "name": "closed", "is_im": True, "is_open": False},
+            "dm_D123",
+            "closed_D999",
+        ),  # open
+        (
+            "is:org_default hello",
+            {"id": "C123", "name": "allhands", "is_channel": True, "is_org_default": True},
+            {"id": "C999", "name": "other", "is_channel": True},
+            "allhands_C123",
+            "other_C999",
+        ),  # org_default
+        (
+            "is:global_shared hello",
+            {"id": "C123", "name": "grid", "is_channel": True, "is_global_shared": True},
+            {"id": "C999", "name": "local", "is_channel": True},
+            "grid_C123",
+            "local_C999",
+        ),  # global_shared
+        (
+            "is:org_mandatory hello",
+            {"id": "C123", "name": "must", "is_channel": True, "is_org_mandatory": True},
+            {"id": "C999", "name": "opt", "is_channel": True},
+            "must_C123",
+            "opt_C999",
+        ),  # org_mandatory
+        (
+            "is:member hello",
+            {"id": "C123", "name": "in", "is_channel": True, "is_member": True},
+            {"id": "C999", "name": "out", "is_channel": True, "is_member": False},
+            "in_C123",
+            "out_C999",
+        ),  # member
+        (
+            "is:pending_ext_shared hello",
+            {"id": "C123", "name": "wait", "is_channel": True, "is_pending_ext_shared": True},
+            {"id": "C999", "name": "ok", "is_channel": True},
+            "wait_C123",
+            "ok_C999",
+        ),  # pending_ext_shared
+        (
+            "is:pending_shared hello",
+            {"id": "C123", "name": "wait", "is_channel": True, "is_pending_shared": True},
+            {"id": "C999", "name": "ok", "is_channel": True},
+            "wait_C123",
+            "ok_C999",
+        ),  # pending_shared
+        (
+            "is:has_canvas hello",
+            {"id": "C123", "name": "docs", "is_channel": True, "has_canvas": True},
+            {"id": "C999", "name": "chat", "is_channel": True},
+            "docs_C123",
+            "chat_C999",
+        ),  # has_canvas
+        (
+            "is:unlinked hello",
+            {"id": "C123", "name": "old", "is_channel": True, "unlinked": 99},
+            {"id": "C999", "name": "live", "is_channel": True},
+            "old_C123",
+            "live_C999",
+        ),  # unlinked
+        (
+            "is:im_blocked hello",
+            {"id": "D123", "name": "blocked", "is_im": True, "is_im_blocked": True},
+            {"id": "D999", "name": "open", "is_im": True},
+            "blocked_D123",
+            "open_D999",
+        ),  # im_blocked
+        (
+            "is:read_only hello",
+            {"id": "C123", "name": "ro", "is_channel": True, "is_read_only": True},
+            {"id": "C999", "name": "rw", "is_channel": True},
+            "ro_C123",
+            "rw_C999",
+        ),  # read_only
+        (
+            "is:thread_only hello",
+            {"id": "C123", "name": "threads", "is_channel": True, "is_thread_only": True},
+            {"id": "C999", "name": "chat", "is_channel": True},
+            "threads_C123",
+            "chat_C999",
+        ),  # thread_only
+        (
+            "is:non_threadable hello",
+            {"id": "C123", "name": "flat", "is_channel": True, "is_non_threadable": True},
+            {"id": "C999", "name": "chat", "is_channel": True},
+            "flat_C123",
+            "chat_C999",
+        ),  # non_threadable
+        (
+            "is:user_deleted hello",
+            {"id": "D1", "name": "gone", "is_im": True, "is_user_deleted": True, "user": "U2"},
+            {"id": "D9", "name": "live", "is_im": True, "user": "U3"},
+            "gone_D1",
+            "live_D9",
+        ),  # user_deleted
+    ],
+    ids=[
+        "org_shared",
+        "archived",
+        "frozen",
+        "muted",
+        "open",
+        "org_default",
+        "global_shared",
+        "org_mandatory",
+        "member",
+        "pending_ext_shared",
+        "pending_shared",
+        "has_canvas",
+        "unlinked",
+        "im_blocked",
+        "read_only",
+        "thread_only",
+        "non_threadable",
+        "user_deleted",
+    ],
+)
+def test_search_is_channel_flag(
+    tmp_path: Path,
+    query: str,
+    hit: dict,
+    miss: dict,
+    hit_dir: str,
+    miss_dir: str,
+) -> None:
+    _write(tmp_path / "acme" / "conversations.json", [hit, miss])
+    _write((tmp_path / "acme" / hit_dir) / "messages.json", [_msg("1.0", "hello")])
+    _write((tmp_path / "acme" / miss_dir) / "messages.json", [_msg("2.0", "hello")])
+    client = DumpClient(tmp_path)
+    hits = client.search_messages(query=query)["messages"]["matches"]
+    assert [m["channel"]["id"] for m in hits] == [hit["id"]]
+
+
+def test_search_after_yesterday(tmp_path: Path, monkeypatch) -> None:
+    _freeze_search_now(monkeypatch)
     _write(
         (tmp_path / "acme" / "general_C123") / "messages.json",
         [
@@ -2233,7 +2997,8 @@ def test_search_after_yesterday(tmp_path: Path) -> None:
     assert texts == {"today ping", "yesterday ping"}
 
 
-def test_search_during_today(tmp_path: Path) -> None:
+def test_search_during_today(tmp_path: Path, monkeypatch) -> None:
+    _freeze_search_now(monkeypatch)
     _write(
         (tmp_path / "acme" / "general_C123") / "messages.json",
         [
@@ -2278,10 +3043,8 @@ def test_team_access_logs_page(tmp_path: Path) -> None:
     assert page2["logins"][0]["ip"] == "2.2.2.2"
 
 
-def test_search_during_year(tmp_path: Path) -> None:
-    from datetime import UTC, datetime
-
-    now = datetime.now(UTC)
+def test_search_during_year(tmp_path: Path, monkeypatch) -> None:
+    now = _freeze_search_now(monkeypatch)
     this_year = now.replace(month=6, day=15, hour=12, minute=0, second=0, microsecond=0)
     last_year = this_year.replace(year=this_year.year - 1)
     _write(
@@ -2295,28 +3058,6 @@ def test_search_during_year(tmp_path: Path) -> None:
     hits = client.search_messages(query="during:year ping")["messages"]["matches"]
     texts = {m["text"] for m in hits}
     assert texts == {"this year ping"}
-
-
-def test_search_has_video(tmp_path: Path) -> None:
-    clip = _msg("1.0", "clip")
-    clip["files"] = [{"id": "Fv", "name": "a.mp4", "filetype": "mp4", "mimetype": "video/mp4"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [clip, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:video")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["clip"]
-
-
-def test_search_has_audio(tmp_path: Path) -> None:
-    sound = _msg("1.0", "sound")
-    sound["files"] = [{"id": "Fa", "name": "a.mp3", "filetype": "mp3", "mimetype": "audio/mpeg"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [sound, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:audio")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["sound"]
 
 
 def test_team_billable_info_user(tmp_path: Path) -> None:
@@ -2408,10 +3149,10 @@ def test_dnd_team_info_users(tmp_path: Path) -> None:
     assert resp["users"]["U1"]["dnd_enabled"] is True
 
 
-def test_search_during_lastweek(tmp_path: Path) -> None:
-    from datetime import UTC, datetime, timedelta
+def test_search_during_lastweek(tmp_path: Path, monkeypatch) -> None:
+    from datetime import timedelta
 
-    noon = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
+    noon = _freeze_search_now(monkeypatch)
     this_monday = noon - timedelta(days=noon.weekday())
     last_monday = this_monday - timedelta(days=7)
     older = last_monday - timedelta(days=7)
@@ -2429,10 +3170,8 @@ def test_search_during_lastweek(tmp_path: Path) -> None:
     assert texts == {"last week ping"}
 
 
-def test_search_during_lastmonth(tmp_path: Path) -> None:
-    from datetime import UTC, datetime
-
-    now = datetime.now(UTC)
+def test_search_during_lastmonth(tmp_path: Path, monkeypatch) -> None:
+    now = _freeze_search_now(monkeypatch)
     this_mid = now.replace(day=15, hour=12, minute=0, second=0, microsecond=0)
     if this_mid.month == 1:
         last_mid = this_mid.replace(year=this_mid.year - 1, month=12)
@@ -2473,10 +3212,8 @@ def test_bookmarks_list_all_channels(tmp_path: Path) -> None:
     assert {b["id"] for b in resp["bookmarks"]} == {"Bk1", "Bk2"}
 
 
-def test_search_files_during_year(tmp_path: Path) -> None:
-    from datetime import UTC, datetime
-
-    now = datetime.now(UTC)
+def test_search_files_during_year(tmp_path: Path, monkeypatch) -> None:
+    now = _freeze_search_now(monkeypatch)
     this_year = now.replace(month=6, day=15, hour=12, minute=0, second=0, microsecond=0)
     last_year = this_year.replace(year=this_year.year - 1)
     ws = tmp_path / "acme"
@@ -2841,19 +3578,6 @@ def test_iter_pins_bookmarks_bots(tmp_path: Path) -> None:
     assert [b["id"] for b in client.iter_bots()] == ["B1"]
 
 
-def test_search_has_space(tmp_path: Path) -> None:
-    post = _msg("1.0", "post")
-    post["files"] = [{"id": "Fp", "name": "doc", "filetype": "space"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [post, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:space")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["post"]
-    files = client.search_files(query="has:space")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Fp"]
-
-
 def test_search_is_unthreaded(dump_root: Path) -> None:
     client = DumpClient(dump_root)
     hits = client.search_messages(query="is:unthreaded")["messages"]["matches"]
@@ -2865,10 +3589,8 @@ def test_search_is_unthreaded(dump_root: Path) -> None:
     assert "standalone reply" not in texts
 
 
-def test_search_during_lastyear(tmp_path: Path) -> None:
-    from datetime import UTC, datetime
-
-    now = datetime.now(UTC)
+def test_search_during_lastyear(tmp_path: Path, monkeypatch) -> None:
+    now = _freeze_search_now(monkeypatch)
     this_year = now.replace(month=6, day=15, hour=12, minute=0, second=0, microsecond=0)
     last_year = this_year.replace(year=this_year.year - 1)
     _write(
@@ -2958,37 +3680,28 @@ def test_iter_usergroups(tmp_path: Path) -> None:
     assert [g["id"] for g in client.iter_usergroups()] == ["S1"]
 
 
-def test_search_is_locked(tmp_path: Path) -> None:
-    plain = _msg("1.0", "plain")
-    locked = _msg("2.0", "locked")
-    locked["is_locked"] = True
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [plain, locked])
+@pytest.mark.parametrize(
+    ("key", "value", "query", "hit_text"),
+    [
+        ("is_locked", True, "is:locked", "locked"),
+        ("subtype", "tombstone", "is:tombstone", "deleted"),
+        ("app_id", "A1", "is:app", "app msg"),
+        ("subtype", "file_share", "is:file_share", "file share"),
+        ("hidden", True, "is:hidden", "hidden"),
+        ("x_files", ["Fgone"], "has:x_files", "x files"),
+        ("subtype", "me_message", "is:me_message", "me msg"),
+        ("metadata", {"event_type": "task_created"}, "has:metadata", "meta"),
+    ],
+    ids=["locked", "tombstone", "app", "file_share", "hidden", "x_files", "me_message", "metadata"],
+)
+def test_search_simple_message_flag(tmp_path: Path, key: str, value: Any, query: str, hit_text: str) -> None:
+    special = _msg("1.0", hit_text)
+    special[key] = value
+    plain = _msg("2.0", "plain")
+    _write((tmp_path / "acme" / "general_C123") / "messages.json", [special, plain])
     client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:locked")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["locked"]
-
-
-def test_search_is_tombstone(tmp_path: Path) -> None:
-    plain = _msg("1.0", "plain")
-    gone = _msg("2.0", "gone")
-    gone["subtype"] = "tombstone"
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [plain, gone])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:tombstone")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["gone"]
-
-
-def test_search_has_email(tmp_path: Path) -> None:
-    mail = _msg("1.0", "mail")
-    mail["files"] = [{"id": "Fe", "name": "note.eml", "filetype": "email"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [mail, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:email")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["mail"]
-    files = client.search_files(query="has:email")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Fe"]
+    hits = client.search_messages(query=query)["messages"]["matches"]
+    assert [m["text"] for m in hits] == [hit_text]
 
 
 def test_iter_scheduled(tmp_path: Path) -> None:
@@ -3032,16 +3745,6 @@ def test_search_in_me(tmp_path: Path) -> None:
     assert [m["text"] for m in hits] == ["dm hi"]
 
 
-def test_search_is_app(tmp_path: Path) -> None:
-    plain = _msg("1.0", "plain")
-    app = _msg("2.0", "app post")
-    app["app_id"] = "A1"
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [plain, app])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:app")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["app post"]
-
-
 def test_search_with_me(tmp_path: Path) -> None:
     _write((tmp_path / "acme" / "general_C123") / "messages.json", [_msg("1.0", "public")])
     dm = tmp_path / "acme" / "alice_D111"
@@ -3056,26 +3759,6 @@ def test_search_with_me(tmp_path: Path) -> None:
     assert [m["text"] for m in hits] == ["dm hi"]
 
 
-def test_search_is_file_share(tmp_path: Path) -> None:
-    plain = _msg("1.0", "plain")
-    share = _msg("2.0", "shared a file")
-    share["subtype"] = "file_share"
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [plain, share])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:file_share")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["shared a file"]
-
-
-def test_search_has_x_files(tmp_path: Path) -> None:
-    gone = _msg("1.0", "was a file")
-    gone["x_files"] = ["Fgone"]
-    plain = _msg("2.0", "plain")
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [gone, plain])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:x_files")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["was a file"]
-
-
 def test_search_is_me(tmp_path: Path) -> None:
     mine = _msg("1.0", "mine")
     theirs = _msg("2.0", "theirs")
@@ -3086,29 +3769,6 @@ def test_search_is_me(tmp_path: Path) -> None:
     client = DumpClient(tmp_path)
     hits = client.search_messages(query="is:me")["messages"]["matches"]
     assert [m["text"] for m in hits] == ["mine"]
-
-
-def test_search_is_hidden(tmp_path: Path) -> None:
-    hid = _msg("1.0", "secret")
-    hid["hidden"] = True
-    plain = _msg("2.0", "plain")
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [hid, plain])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:hidden")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["secret"]
-
-
-def test_search_has_pdf(tmp_path: Path) -> None:
-    doc = _msg("1.0", "doc")
-    doc["files"] = [{"id": "Fpdf", "name": "a.pdf", "filetype": "pdf"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [doc, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:pdf")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["doc"]
-    files = client.search_files(query="has:pdf")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Fpdf"]
 
 
 def test_search_has_replies(tmp_path: Path) -> None:
@@ -3154,29 +3814,6 @@ def test_search_is_join_and_leave(tmp_path: Path) -> None:
     assert [m["text"] for m in client.search_messages(query="is:leave")["messages"]["matches"]] == [
         "left"
     ]
-
-
-def test_search_has_spreadsheet(tmp_path: Path) -> None:
-    sheet = _msg("1.0", "sheet")
-    sheet["files"] = [{"id": "Fx", "name": "a.xlsx", "filetype": "xlsx"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [sheet, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:spreadsheet")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["sheet"]
-    files = client.search_files(query="has:spreadsheet")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Fx"]
-
-
-def test_search_has_metadata(tmp_path: Path) -> None:
-    meta = _msg("1.0", "meta")
-    meta["metadata"] = {"event_type": "task_created"}
-    plain = _msg("2.0", "plain")
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [meta, plain])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:metadata")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["meta"]
 
 
 def test_search_has_remote(tmp_path: Path) -> None:
@@ -3243,19 +3880,6 @@ def test_search_is_parent(tmp_path: Path) -> None:
     assert [m["text"] for m in hits] == ["root"]
 
 
-def test_search_has_zip(tmp_path: Path) -> None:
-    zipped = _msg("1.0", "zip")
-    zipped["files"] = [{"id": "Fz", "name": "a.zip", "filetype": "zip"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [zipped, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:zip")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["zip"]
-    files = client.search_files(query="has:zip")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Fz"]
-
-
 def test_reminders_list_user(tmp_path: Path) -> None:
     ws = tmp_path / "acme"
     _write((ws / "general_C123") / "messages.json", [])
@@ -3308,19 +3932,6 @@ def test_search_is_subscribed(tmp_path: Path) -> None:
     client = DumpClient(tmp_path)
     hits = client.search_messages(query="is:subscribed")["messages"]["matches"]
     assert [m["text"] for m in hits] == ["watched"]
-
-
-def test_search_has_presentation(tmp_path: Path) -> None:
-    deck = _msg("1.0", "deck")
-    deck["files"] = [{"id": "Fp", "name": "talk.pptx", "filetype": "pptx"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [deck, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:presentation")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["deck"]
-    files = client.search_files(query="has:presentation")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Fp"]
 
 
 def test_iter_integration_logs(tmp_path: Path) -> None:
@@ -3385,19 +3996,6 @@ def test_search_is_shared(tmp_path: Path) -> None:
     assert [m["channel"]["id"] for m in hits] == ["C123"]
 
 
-def test_search_has_list(tmp_path: Path) -> None:
-    listed = _msg("1.0", "listed")
-    listed["files"] = [{"id": "Fl", "name": "tasks", "filetype": "list"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [listed, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:list")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["listed"]
-    files = client.search_files(query="has:list")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Fl"]
-
-
 def test_team_preferences_list(tmp_path: Path) -> None:
     ws = tmp_path / "acme"
     _write((ws / "general_C123") / "messages.json", [])
@@ -3432,19 +4030,6 @@ def test_search_is_call(tmp_path: Path) -> None:
     assert [m["text"] for m in hits] == ["huddle"]
     hits = client.search_messages(query="is:huddle")["messages"]["matches"]
     assert [m["text"] for m in hits] == ["huddle"]
-
-
-def test_search_has_doc(tmp_path: Path) -> None:
-    doc = _msg("1.0", "doc")
-    doc["files"] = [{"id": "Fd", "name": "spec.docx", "filetype": "docx"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [doc, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:doc")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["doc"]
-    files = client.search_files(query="has:doc")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Fd"]
 
 
 def test_rtm_connect(tmp_path: Path) -> None:
@@ -3488,53 +4073,32 @@ def test_conversations_info_num_members_from_roster(tmp_path: Path) -> None:
     assert info["num_members"] == 3
 
 
-def test_search_is_general(tmp_path: Path) -> None:
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "random_C999") / "messages.json", [_msg("2.0", "hello")])
+@pytest.mark.parametrize(
+    ("channel_a", "channel_b", "query", "want_id"),
+    [
+        ("general_C123", "random_C999", "is:general hello", "C123"),
+        ("random_C123", "general_C999", "is:random hello", "C123"),
+    ],
+)
+def test_search_is_named_channel(
+    tmp_path: Path, channel_a: str, channel_b: str, query: str, want_id: str
+) -> None:
+    _write((tmp_path / "acme" / channel_a) / "messages.json", [_msg("1.0", "hello")])
+    _write((tmp_path / "acme" / channel_b) / "messages.json", [_msg("2.0", "hello")])
     client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:general hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
-def test_search_is_org_shared(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "C123", "name": "grid", "is_channel": True, "is_org_shared": True},
-            {"id": "C999", "name": "local", "is_channel": True, "is_org_shared": False},
-        ],
-    )
-    _write((tmp_path / "acme" / "grid_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "local_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:org_shared hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
+    hits = client.search_messages(query=query)["messages"]["matches"]
+    assert [m["channel"]["id"] for m in hits] == [want_id]
 
 
 def test_search_has_button(tmp_path: Path) -> None:
     btn = _msg("1.0", "btn")
-    btn["blocks"] = [
-        {"type": "actions", "elements": [{"type": "button", "text": {"text": "Go"}}]}
-    ]
+    btn["blocks"] = [{"type": "actions", "elements": [{"type": "button", "text": {"text": "Go"}}]}]
     plain = _msg("2.0", "plain")
     plain["blocks"] = [{"type": "section", "text": {"text": "hi"}}]
     _write((tmp_path / "acme" / "general_C123") / "messages.json", [btn, plain])
     client = DumpClient(tmp_path)
     hits = client.search_messages(query="has:button")["messages"]["matches"]
     assert [m["text"] for m in hits] == ["btn"]
-
-
-def test_search_has_txt(tmp_path: Path) -> None:
-    note = _msg("1.0", "note")
-    note["files"] = [{"id": "Ft", "name": "notes.txt", "filetype": "text"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [note, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:txt")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["note"]
-    files = client.search_files(query="has:txt")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Ft"]
 
 
 def test_usergroups_users_list_alias(tmp_path: Path) -> None:
@@ -3578,34 +4142,6 @@ def test_search_is_ephemeral(tmp_path: Path) -> None:
     client = DumpClient(tmp_path)
     hits = client.search_messages(query="is:ephemeral")["messages"]["matches"]
     assert [m["text"] for m in hits] == ["eph"]
-
-
-def test_search_is_archived(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "C123", "name": "old", "is_channel": True, "is_archived": True},
-            {"id": "C999", "name": "live", "is_channel": True, "is_archived": False},
-        ],
-    )
-    _write((tmp_path / "acme" / "old_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "live_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:archived hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
-def test_search_has_gif(tmp_path: Path) -> None:
-    gif = _msg("1.0", "gif")
-    gif["files"] = [{"id": "Fg", "name": "loop.gif", "filetype": "gif"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [gif, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:gif")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["gif"]
-    files = client.search_files(query="has:gif")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Fg"]
 
 
 def test_users_info_presence_from_sidecar(tmp_path: Path) -> None:
@@ -3692,14 +4228,6 @@ def test_iter_external_teams(tmp_path: Path) -> None:
     assert [row["id"] for row in client.iter_external_teams()] == ["E1"]
 
 
-def test_search_is_random(tmp_path: Path) -> None:
-    _write((tmp_path / "acme" / "random_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "general_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:random hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
 def test_search_is_creator(tmp_path: Path) -> None:
     ch = tmp_path / "acme" / "general_C123"
     _write(ch / "channel.json", {"id": "C123", "name": "general", "creator": "U1"})
@@ -3709,19 +4237,6 @@ def test_search_is_creator(tmp_path: Path) -> None:
     client = DumpClient(tmp_path)
     hits = client.search_messages(query="is:creator")["messages"]["matches"]
     assert [m["text"] for m in hits] == ["owner"]
-
-
-def test_search_has_json(tmp_path: Path) -> None:
-    blob = _msg("1.0", "blob")
-    blob["files"] = [{"id": "Fj", "name": "data.json", "filetype": "json"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [blob, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:json")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["blob"]
-    files = client.search_files(query="has:json")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Fj"]
 
 
 def test_users_list_presence_from_sidecar(tmp_path: Path) -> None:
@@ -3763,19 +4278,6 @@ def test_iter_presence(tmp_path: Path) -> None:
     assert rows == [{"user_id": "U8", "presence": "active", "online": True}]
 
 
-def test_search_has_csv(tmp_path: Path) -> None:
-    sheet = _msg("1.0", "sheet")
-    sheet["files"] = [{"id": "Fc", "name": "data.csv", "filetype": "csv"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [sheet, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:csv")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["sheet"]
-    files = client.search_files(query="has:csv")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Fc"]
-
-
 def test_search_is_delayed(tmp_path: Path) -> None:
     late = _msg("1.0", "later")
     late["is_delayed_message"] = True
@@ -3813,19 +4315,6 @@ def test_usergroups_list_page(tmp_path: Path) -> None:
     client = DumpClient(tmp_path)
     resp = client.usergroups_list(count=1, page=2)
     assert [g["id"] for g in resp["usergroups"]] == ["S2"]
-
-
-def test_search_has_xml(tmp_path: Path) -> None:
-    blob = _msg("1.0", "blob")
-    blob["files"] = [{"id": "Fx", "name": "data.xml", "filetype": "xml"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [blob, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:xml")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["blob"]
-    files = client.search_files(query="has:xml")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Fx"]
 
 
 def test_search_is_guest(tmp_path: Path) -> None:
@@ -3880,51 +4369,31 @@ def test_emoji_get(tmp_path: Path) -> None:
     assert missing["ok"] is False
 
 
-def test_search_is_admin(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("flag", "query", "hit_text"),
+    [
+        ("is_admin", "is:admin", "from admin"),
+        ("is_owner", "is:owner", "from owner"),
+        ("is_app_user", "is:app_user", "from app user"),
+        ("is_connector", "is:connector", "from connector"),
+        ("is_workflow_bot", "is:workflow_bot", "from workflow bot"),
+    ],
+)
+def test_search_is_role_flag(tmp_path: Path, flag: str, query: str, hit_text: str) -> None:
     ws = tmp_path / "acme"
-    admin = _msg("1.0", "from admin")
-    admin["user"] = "U9"
-    _write((ws / "general_C123") / "messages.json", [admin, _msg("2.0", "from member")])
+    hit = _msg("1.0", hit_text)
+    hit["user"] = "U9"
+    _write((ws / "general_C123") / "messages.json", [hit, _msg("2.0", "from member")])
     _write(
         ws / "users.json",
         {
-            "U1": {"id": "U1", "handle": "alice", "is_admin": False},
-            "U9": {"id": "U9", "handle": "boss", "is_admin": True},
+            "U1": {"id": "U1", "handle": "alice", flag: False},
+            "U9": {"id": "U9", "handle": "boss", flag: True},
         },
     )
     client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:admin")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["from admin"]
-
-
-def test_search_is_owner(tmp_path: Path) -> None:
-    ws = tmp_path / "acme"
-    owner = _msg("1.0", "from owner")
-    owner["user"] = "U9"
-    _write((ws / "general_C123") / "messages.json", [owner, _msg("2.0", "from member")])
-    _write(
-        ws / "users.json",
-        {
-            "U1": {"id": "U1", "handle": "alice", "is_owner": False},
-            "U9": {"id": "U9", "handle": "boss", "is_owner": True},
-        },
-    )
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:owner")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["from owner"]
-
-
-def test_search_has_md(tmp_path: Path) -> None:
-    doc = _msg("1.0", "doc")
-    doc["files"] = [{"id": "Fm", "name": "notes.md", "filetype": "markdown"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [doc, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:md")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["doc"]
-    files = client.search_files(query="has:markdown")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Fm"]
+    hits = client.search_messages(query=query)["messages"]["matches"]
+    assert [m["text"] for m in hits] == [hit_text]
 
 
 def test_users_list_locale_color(tmp_path: Path) -> None:
@@ -4008,82 +4477,6 @@ def test_auth_teams_list_from_sidecar(tmp_path: Path) -> None:
     assert empty["ok"] is False
 
 
-def test_search_is_app_user(tmp_path: Path) -> None:
-    ws = tmp_path / "acme"
-    app = _msg("1.0", "from app user")
-    app["user"] = "U9"
-    _write((ws / "general_C123") / "messages.json", [app, _msg("2.0", "from member")])
-    _write(
-        ws / "users.json",
-        {
-            "U1": {"id": "U1", "handle": "alice", "is_app_user": False},
-            "U9": {"id": "U9", "handle": "botty", "is_app_user": True},
-        },
-    )
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:app_user")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["from app user"]
-
-
-def test_search_is_connector(tmp_path: Path) -> None:
-    ws = tmp_path / "acme"
-    conn = _msg("1.0", "from connector")
-    conn["user"] = "U9"
-    _write((ws / "general_C123") / "messages.json", [conn, _msg("2.0", "from member")])
-    _write(
-        ws / "users.json",
-        {
-            "U1": {"id": "U1", "handle": "alice", "is_connector": False},
-            "U9": {"id": "U9", "handle": "bridge", "is_connector": True},
-        },
-    )
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:connector")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["from connector"]
-
-
-def test_search_is_workflow_bot(tmp_path: Path) -> None:
-    ws = tmp_path / "acme"
-    bot = _msg("1.0", "from workflow bot")
-    bot["user"] = "U9"
-    _write((ws / "general_C123") / "messages.json", [bot, _msg("2.0", "from member")])
-    _write(
-        ws / "users.json",
-        {
-            "U1": {"id": "U1", "handle": "alice", "is_workflow_bot": False},
-            "U9": {"id": "U9", "handle": "flow", "is_workflow_bot": True},
-        },
-    )
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:workflow_bot")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["from workflow bot"]
-
-
-def test_search_is_me_message(tmp_path: Path) -> None:
-    me = _msg("1.0", "shrugs")
-    me["subtype"] = "me_message"
-    _write(
-        (tmp_path / "acme" / "general_C123") / "messages.json",
-        [me, _msg("2.0", "plain")],
-    )
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:me_message")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["shrugs"]
-
-
-def test_search_has_yaml(tmp_path: Path) -> None:
-    blob = _msg("1.0", "blob")
-    blob["files"] = [{"id": "Fy", "name": "data.yaml", "filetype": "yaml"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [blob, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:yaml")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["blob"]
-    files = client.search_files(query="has:yml")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Fy"]
-
-
 def test_users_list_stranger_flag(tmp_path: Path) -> None:
     ws = tmp_path / "acme"
     _write((ws / "general_C123") / "messages.json", [])
@@ -4146,51 +4539,29 @@ def test_files_remote_list_from_sidecar(tmp_path: Path) -> None:
     assert empty["ok"] is False
 
 
-def test_search_is_stranger(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("flag_key", "query", "expected_text"),
+    [
+        ("is_stranger", "is:stranger", "from stranger"),
+        ("is_invited_user", "is:invited", "from invited"),
+        ("is_primary_owner", "is:primary_owner", "from owner"),
+        ("is_ultra_restricted", "is:ultra_restricted", "from guest"),
+    ],
+)
+def test_search_is_user_flag(tmp_path: Path, flag_key: str, query: str, expected_text: str) -> None:
     ws = tmp_path / "acme"
-    ext = _msg("1.0", "from stranger")
-    ext["user"] = "U9"
-    _write((ws / "general_C123") / "messages.json", [ext, _msg("2.0", "from member")])
+    msg = _msg("1.0", expected_text)
+    msg["user"] = "U9"
+    _write((ws / "general_C123") / "messages.json", [msg, _msg("2.0", "from member")])
     _write(
         ws / "users.json",
         {
             "U1": {"id": "U1", "handle": "alice"},
-            "U9": {"id": "U9", "handle": "ext", "is_stranger": True},
+            "U9": {"id": "U9", "handle": "u9", flag_key: True},
         },
     )
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:stranger")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["from stranger"]
-
-
-def test_search_is_invited(tmp_path: Path) -> None:
-    ws = tmp_path / "acme"
-    invited = _msg("1.0", "from invited")
-    invited["user"] = "U9"
-    _write((ws / "general_C123") / "messages.json", [invited, _msg("2.0", "from member")])
-    _write(
-        ws / "users.json",
-        {
-            "U1": {"id": "U1", "handle": "alice"},
-            "U9": {"id": "U9", "handle": "new", "is_invited_user": True},
-        },
-    )
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:invited")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["from invited"]
-
-
-def test_search_has_toml(tmp_path: Path) -> None:
-    blob = _msg("1.0", "blob")
-    blob["files"] = [{"id": "Ft", "name": "pyproject.toml", "filetype": "toml"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [blob, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:toml")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["blob"]
-    files = client.search_files(query="has:toml")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Ft"]
+    hits = DumpClient(tmp_path).search_messages(query=query)["messages"]["matches"]
+    assert [m["text"] for m in hits] == [expected_text]
 
 
 def test_iter_teams(tmp_path: Path) -> None:
@@ -4214,40 +4585,6 @@ def test_emoji_list_categories(tmp_path: Path) -> None:
     assert [c["name"] for c in hits] == ["Custom"]
     empty = client.emoji_categories_search(query="")
     assert empty["ok"] is False
-
-
-def test_search_is_primary_owner(tmp_path: Path) -> None:
-    ws = tmp_path / "acme"
-    boss = _msg("1.0", "from owner")
-    boss["user"] = "U9"
-    _write((ws / "general_C123") / "messages.json", [boss, _msg("2.0", "from member")])
-    _write(
-        ws / "users.json",
-        {
-            "U1": {"id": "U1", "handle": "alice"},
-            "U9": {"id": "U9", "handle": "boss", "is_primary_owner": True},
-        },
-    )
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:primary_owner")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["from owner"]
-
-
-def test_search_is_ultra_restricted(tmp_path: Path) -> None:
-    ws = tmp_path / "acme"
-    guest = _msg("1.0", "from guest")
-    guest["user"] = "U9"
-    _write((ws / "general_C123") / "messages.json", [guest, _msg("2.0", "from member")])
-    _write(
-        ws / "users.json",
-        {
-            "U1": {"id": "U1", "handle": "alice"},
-            "U9": {"id": "U9", "handle": "ext", "is_ultra_restricted": True},
-        },
-    )
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:ultra_restricted")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["from guest"]
 
 
 def test_search_has_html_and_svg(tmp_path: Path) -> None:
@@ -4332,36 +4669,6 @@ def test_conversations_info_frozen_open(tmp_path: Path) -> None:
     assert info["shared_team_ids"] == ["T1", "Tother"]
 
 
-def test_search_is_frozen(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "C123", "name": "ice", "is_channel": True, "is_frozen": True},
-            {"id": "C999", "name": "live", "is_channel": True, "is_frozen": False},
-        ],
-    )
-    _write((tmp_path / "acme" / "ice_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "live_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:frozen hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
-def test_search_is_muted(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "C123", "name": "quiet", "is_channel": True, "is_muted": True},
-            {"id": "C999", "name": "loud", "is_channel": True, "is_muted": False},
-        ],
-    )
-    _write((tmp_path / "acme" / "quiet_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "loud_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:muted hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
 def test_search_is_unreads(tmp_path: Path) -> None:
     _write(
         tmp_path / "acme" / "conversations.json",
@@ -4384,49 +4691,6 @@ def test_search_is_unreads(tmp_path: Path) -> None:
     client = DumpClient(tmp_path)
     hits = client.search_messages(query="is:unreads hello")["messages"]["matches"]
     assert [m["ts"] for m in hits] == ["2.0"]
-
-
-def test_search_is_open(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "D123", "name": "dm", "is_im": True, "is_open": True},
-            {"id": "D999", "name": "closed", "is_im": True, "is_open": False},
-        ],
-    )
-    _write((tmp_path / "acme" / "dm_D123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "closed_D999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:open hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["D123"]
-
-
-def test_search_is_org_default(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "C123", "name": "allhands", "is_channel": True, "is_org_default": True},
-            {"id": "C999", "name": "other", "is_channel": True},
-        ],
-    )
-    _write((tmp_path / "acme" / "allhands_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "other_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:org_default hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
-def test_search_has_python(tmp_path: Path) -> None:
-    py = _msg("1.0", "script")
-    py["files"] = [{"id": "Fp", "name": "app.py", "filetype": "python"}]
-    pic = _msg("2.0", "pic")
-    pic["files"] = [{"id": "Fi", "name": "a.png", "filetype": "png"}]
-    _write((tmp_path / "acme" / "general_C123") / "messages.json", [py, pic])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="has:python")["messages"]["matches"]
-    assert [m["text"] for m in hits] == ["script"]
-    files = client.search_files(query="has:py")["files"]["matches"]
-    assert [f["id"] for f in files] == ["Fp"]
 
 
 def test_rtm_start_includes_users_channels(tmp_path: Path) -> None:
@@ -4453,51 +4717,6 @@ def test_rtm_start_includes_bots(tmp_path: Path) -> None:
     assert [b["id"] for b in start["bots"]] == ["B9"]
     connect = client.rtm_connect()
     assert "bots" not in connect
-
-
-def test_search_is_global_shared(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "C123", "name": "grid", "is_channel": True, "is_global_shared": True},
-            {"id": "C999", "name": "local", "is_channel": True},
-        ],
-    )
-    _write((tmp_path / "acme" / "grid_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "local_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:global_shared hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
-def test_search_is_org_mandatory(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "C123", "name": "must", "is_channel": True, "is_org_mandatory": True},
-            {"id": "C999", "name": "opt", "is_channel": True},
-        ],
-    )
-    _write((tmp_path / "acme" / "must_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "opt_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:org_mandatory hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
-def test_search_is_member(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "C123", "name": "in", "is_channel": True, "is_member": True},
-            {"id": "C999", "name": "out", "is_channel": True, "is_member": False},
-        ],
-    )
-    _write((tmp_path / "acme" / "in_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "out_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:member hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
 
 
 def test_search_has_javascript(tmp_path: Path) -> None:
@@ -4634,173 +4853,39 @@ def test_users_list_always_active(tmp_path: Path) -> None:
     assert member["is_email_confirmed"] is True
 
 
-def test_search_is_pending_ext_shared(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("ch123_extra", "ch123_name", "ch999_name", "ch999_extra", "query"),
+    [
+        (
+            {"connected_limited_team_ids": ["Tlim"]},
+            "lim",
+            "full",
+            {"connected_team_ids": ["T2"]},
+            "is:connected_limited",
+        ),
+        ({"conversation_host_id": "T1"}, "hosted", "guest", {}, "is:host"),
+        ({"internal_team_ids": ["T1"]}, "inside", "outside", {}, "is:internal"),
+        ({"connected_team_ids": ["Tother"]}, "shared", "local", {}, "is:connected"),
+    ],
+)
+def test_search_is_team_channel_flag(
+    tmp_path: Path,
+    ch123_extra: dict,
+    ch123_name: str,
+    ch999_name: str,
+    ch999_extra: dict,
+    query: str,
+) -> None:
     _write(
         tmp_path / "acme" / "conversations.json",
         [
-            {"id": "C123", "name": "wait", "is_channel": True, "is_pending_ext_shared": True},
-            {"id": "C999", "name": "ok", "is_channel": True},
+            {"id": "C123", "name": ch123_name, "is_channel": True, **ch123_extra},
+            {"id": "C999", "name": ch999_name, "is_channel": True, **ch999_extra},
         ],
     )
-    _write((tmp_path / "acme" / "wait_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "ok_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:pending_ext_shared hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
-def test_search_is_pending_shared(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "C123", "name": "wait", "is_channel": True, "is_pending_shared": True},
-            {"id": "C999", "name": "ok", "is_channel": True},
-        ],
-    )
-    _write((tmp_path / "acme" / "wait_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "ok_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:pending_shared hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
-def test_search_is_has_canvas(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "C123", "name": "docs", "is_channel": True, "has_canvas": True},
-            {"id": "C999", "name": "chat", "is_channel": True},
-        ],
-    )
-    _write((tmp_path / "acme" / "docs_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "chat_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:has_canvas hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
-def test_search_is_connected_limited(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {
-                "id": "C123",
-                "name": "lim",
-                "is_channel": True,
-                "connected_limited_team_ids": ["Tlim"],
-            },
-            {"id": "C999", "name": "full", "is_channel": True, "connected_team_ids": ["T2"]},
-        ],
-    )
-    _write((tmp_path / "acme" / "lim_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "full_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:connected_limited hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
-def test_search_is_host(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {
-                "id": "C123",
-                "name": "hosted",
-                "is_channel": True,
-                "conversation_host_id": "T1",
-            },
-            {"id": "C999", "name": "guest", "is_channel": True},
-        ],
-    )
-    _write((tmp_path / "acme" / "hosted_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "guest_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:host hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
-def test_search_is_internal(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {
-                "id": "C123",
-                "name": "inside",
-                "is_channel": True,
-                "internal_team_ids": ["T1"],
-            },
-            {"id": "C999", "name": "outside", "is_channel": True},
-        ],
-    )
-    _write((tmp_path / "acme" / "inside_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "outside_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:internal hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
-def test_search_is_unlinked(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "C123", "name": "old", "is_channel": True, "unlinked": 99},
-            {"id": "C999", "name": "live", "is_channel": True},
-        ],
-    )
-    _write((tmp_path / "acme" / "old_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "live_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:unlinked hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
-def test_search_is_connected(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {
-                "id": "C123",
-                "name": "shared",
-                "is_channel": True,
-                "connected_team_ids": ["Tother"],
-            },
-            {"id": "C999", "name": "local", "is_channel": True},
-        ],
-    )
-    _write((tmp_path / "acme" / "shared_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "local_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:connected hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
-def test_search_is_im_blocked(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "D123", "name": "blocked", "is_im": True, "is_im_blocked": True},
-            {"id": "D999", "name": "open", "is_im": True},
-        ],
-    )
-    _write((tmp_path / "acme" / "blocked_D123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "open_D999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:im_blocked hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["D123"]
-
-
-def test_search_is_read_only(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "C123", "name": "ro", "is_channel": True, "is_read_only": True},
-            {"id": "C999", "name": "rw", "is_channel": True},
-        ],
-    )
-    _write((tmp_path / "acme" / "ro_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "rw_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:read_only hello")["messages"]["matches"]
+    _write((tmp_path / "acme" / f"{ch123_name}_C123") / "messages.json", [_msg("1.0", "hello")])
+    _write((tmp_path / "acme" / f"{ch999_name}_C999") / "messages.json", [_msg("2.0", "hello")])
+    hits = DumpClient(tmp_path).search_messages(query=f"{query} hello")["messages"]["matches"]
     assert [m["channel"]["id"] for m in hits] == ["C123"]
 
 
@@ -4902,36 +4987,6 @@ def test_conversations_info_read_only(tmp_path: Path) -> None:
     assert info["connected_team_ids"] == ["Tother"]
 
 
-def test_search_is_thread_only(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "C123", "name": "threads", "is_channel": True, "is_thread_only": True},
-            {"id": "C999", "name": "chat", "is_channel": True},
-        ],
-    )
-    _write((tmp_path / "acme" / "threads_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "chat_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:thread_only hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
-def test_search_is_non_threadable(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "C123", "name": "flat", "is_channel": True, "is_non_threadable": True},
-            {"id": "C999", "name": "chat", "is_channel": True},
-        ],
-    )
-    _write((tmp_path / "acme" / "flat_C123") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "chat_C999") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:non_threadable hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["C123"]
-
-
 def test_search_is_forgotten(tmp_path: Path) -> None:
     ws = tmp_path / "acme"
     gone = _msg("1.0", "hello")
@@ -4987,21 +5042,6 @@ def test_im_user_without_members_json(tmp_path: Path) -> None:
     assert "D1" in ids
     mine = {c["id"] for c in client.users_conversations(user="U1")["channels"]}
     assert "D1" in mine
-
-
-def test_search_is_user_deleted(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "acme" / "conversations.json",
-        [
-            {"id": "D1", "name": "gone", "is_im": True, "is_user_deleted": True, "user": "U2"},
-            {"id": "D9", "name": "live", "is_im": True, "user": "U3"},
-        ],
-    )
-    _write((tmp_path / "acme" / "gone_D1") / "messages.json", [_msg("1.0", "hello")])
-    _write((tmp_path / "acme" / "live_D9") / "messages.json", [_msg("2.0", "hello")])
-    client = DumpClient(tmp_path)
-    hits = client.search_messages(query="is:user_deleted hello")["messages"]["matches"]
-    assert [m["channel"]["id"] for m in hits] == ["D1"]
 
 
 def test_search_is_enterprise(tmp_path: Path) -> None:
@@ -5172,3 +5212,255 @@ def test_files_list_includes_canvases_sidecar(tmp_path: Path) -> None:
     ids = {f["id"] for f in client.files_list()["files"]}
     assert "F1" in ids
     assert "Fc" in ids
+
+
+def test_load_all_file_merge_stable_across_channels(tmp_path: Path) -> None:
+    """Parallel _load_all must merge self._files in discovery order (last wins)."""
+    ws = tmp_path / "acme"
+    msg = {
+        "ts": "1.0",
+        "user": "U1",
+        "user_name": "alice",
+        "text": "f",
+        "reactions": [],
+        "thread": [],
+    }
+    _write(
+        (ws / "aaa_C001") / "messages.json",
+        [{**msg, "files": [{"id": "Fdup", "name": "from-aaa.png", "title": "aaa"}]}],
+    )
+    _write(
+        (ws / "zzz_C002") / "messages.json",
+        [{**msg, "files": [{"id": "Fdup", "name": "from-zzz.png", "title": "zzz"}]}],
+    )
+    client = DumpClient(tmp_path)
+    assert list(client._channels) == ["C001", "C002"]
+    client._load_all()
+    assert client._files["Fdup"]["title"] == "zzz"
+    for _ in range(8):
+        again = DumpClient(tmp_path)
+        again._load_all()
+        assert again._files["Fdup"]["title"] == "zzz"
+
+
+def test_users_search_includes_message_users_and_filters(tmp_path: Path) -> None:
+    ws = tmp_path / "acme"
+    ch = ws / "general_C123"
+    _write(
+        ch / "messages.json",
+        [
+            {
+                "ts": "1.0",
+                "user": "UONLY",
+                "user_name": "onlymsg",
+                "text": "hi",
+                "reactions": [],
+                "thread": [],
+            },
+            {
+                "ts": "2.0",
+                "user": "UBOT",
+                "user_name": "botty",
+                "text": "beep",
+                "reactions": [],
+                "thread": [],
+            },
+        ],
+    )
+    # Mark bot via users.json so include_bots can filter it.
+    _write(
+        ws / "users.json",
+        {
+            "UBOT": {
+                "id": "UBOT",
+                "handle": "botty",
+                "display_name": "botty",
+                "is_bot": True,
+            }
+        },
+    )
+    client = DumpClient(tmp_path)
+    listed = {u["id"] for u in client.users_list()["members"]}
+    assert "UONLY" in listed
+    hits = client.users_search(query="onlymsg")["members"]
+    assert [u["id"] for u in hits] == ["UONLY"]
+    no_bots = client.users_search(query="botty", include_bots=False)["members"]
+    assert no_bots == []
+
+
+def test_scheduled_search_honors_oldest_latest(tmp_path: Path) -> None:
+    ws = tmp_path / "acme"
+    _write((ws / "general_C123") / "messages.json", [])
+    _write(
+        ws / "scheduled_messages.json",
+        [
+            {"id": "Q1", "channel_id": "C123", "text": "standup notes", "post_at": 100},
+            {"id": "Q2", "channel_id": "C123", "text": "standup later", "post_at": 200},
+        ],
+    )
+    client = DumpClient(tmp_path)
+    hits = client.chat_scheduledMessages_search(query="standup", oldest="150", latest="250")[
+        "scheduled_messages"
+    ]
+    assert [m["id"] for m in hits] == ["Q2"]
+
+
+def test_usergroups_search_honors_include_flags(tmp_path: Path) -> None:
+    ws = tmp_path / "acme"
+    _write((ws / "general_C123") / "messages.json", [])
+    _write(
+        ws / "usergroups.json",
+        [{"id": "S1", "handle": "eng", "name": "Engineering", "users": ["U1", "U2"]}],
+    )
+    client = DumpClient(tmp_path)
+    hits = client.usergroups_search(query="eng", include_count=True, include_users=False)[
+        "usergroups"
+    ]
+    assert len(hits) == 1
+    assert hits[0]["user_count"] == 2
+    assert "users" not in hits[0]
+
+
+def test_load_all_concurrent_callers_see_complete_state(tmp_path: Path) -> None:
+    """Two threads calling _load_all must not observe a half-merged client."""
+    import threading
+
+    ws = tmp_path / "acme"
+    for i in range(4):
+        ch = ws / f"chan{i}_C{i}"
+        _write(
+            ch / "messages.json",
+            [
+                {
+                    "ts": f"{i}.0",
+                    "user": "U1",
+                    "user_name": "alice",
+                    "text": f"msg{i}",
+                    "reactions": [],
+                    "files": [{"id": f"F{i}", "name": f"f{i}.txt"}],
+                    "thread": [],
+                }
+            ],
+        )
+    client = DumpClient(tmp_path)
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            client._load_all()
+            assert client._all_loaded
+            assert client._files_len() == 4
+            for ch in client._channels.values():
+                if ch.path.is_dir():
+                    assert ch.loaded is not None
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+        assert not t.is_alive(), "worker did not finish within 30s"
+    assert errors == []
+
+
+def test_ensure_workspace_files_concurrent_callers_see_complete_state(
+    tmp_path: Path,
+) -> None:
+    """_ws_files_loaded must not flip true before ingest finishes."""
+    import threading
+
+    ws = tmp_path / "acme"
+    _write(
+        ws / "files.json",
+        [{"id": f"F{i}", "name": f"file{i}.txt", "user": "U1"} for i in range(24)],
+    )
+    _write(
+        ws / "general_C1" / "messages.json",
+        [
+            {
+                "ts": "1.0",
+                "user": "U1",
+                "user_name": "alice",
+                "text": "hi",
+                "reactions": [],
+                "files": [],
+                "thread": [],
+            }
+        ],
+    )
+    client = DumpClient(tmp_path)
+    errors: list[Exception] = []
+    barrier = threading.Barrier(8)
+
+    def worker() -> None:
+        try:
+            barrier.wait(timeout=30)
+            client._ensure_workspace_files()
+            assert client._ws_files_loaded
+            assert not client._ws_files_in_progress
+            assert client._files_len() == 24
+            for i in range(24):
+                assert client._files_get(f"F{i}") is not None
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+        assert not t.is_alive(), "worker did not finish within 30s"
+    assert errors == []
+
+
+def test_files_iter_safe_under_concurrent_fill(tmp_path: Path) -> None:
+    """Readers must not raise while another thread merges into _files."""
+    import threading
+
+    ws = tmp_path / "acme"
+    for i in range(6):
+        ch = ws / f"chan{i}_C{i}"
+        _write(
+            ch / "messages.json",
+            [
+                {
+                    "ts": f"{i}.0",
+                    "user": "U1",
+                    "user_name": "alice",
+                    "text": f"msg{i}",
+                    "reactions": [],
+                    "files": [{"id": f"F{i}", "name": f"f{i}.txt"}],
+                    "thread": [],
+                }
+            ],
+        )
+    client = DumpClient(tmp_path)
+    errors: list[Exception] = []
+    barrier = threading.Barrier(4)
+
+    def reader() -> None:
+        try:
+            barrier.wait(timeout=30)
+            for _ in range(30):
+                list(client.iter_files())
+                client.files_info(file="F0")
+        except Exception as exc:
+            errors.append(exc)
+
+    def filler() -> None:
+        try:
+            barrier.wait(timeout=30)
+            client._fill_files()
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=reader) for _ in range(3)]
+    threads.append(threading.Thread(target=filler))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+        assert not t.is_alive(), "worker did not finish within 30s"
+    assert errors == []

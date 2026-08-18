@@ -32,7 +32,7 @@ Chrome or Firefox is needed for cookie extraction on newer Slack. Older Slack ve
 ## Install
 
 ```bash
-uv tool install git+https://github.com/maci0/simpleslackdump
+uv tool install --extra chrome --extra leveldb git+https://github.com/maci0/simpleslackdump
 ssd --help
 ```
 
@@ -41,7 +41,8 @@ Or to hack on it:
 ```bash
 git clone https://github.com/maci0/simpleslackdump
 cd simpleslackdump
-uv sync
+# chrome: decrypt Chrome's Slack cookie. leveldb: faster Slack Local Storage reads.
+uv sync --locked --extra chrome --extra leveldb
 uv run ssd --help
 ```
 
@@ -82,7 +83,7 @@ members.json      # roster
 pins.json bookmarks.json reactions.json files.json calls.json threads.json stats.json
 ```
 
-Workspace sidecars land next to the channel dirs. `ssd dump` refreshes them; `ssd sync` only writes missing files. `ssd query` reads them:
+Workspace sidecars land next to the channel dirs. `ssd dump` refreshes workspace and channel sidecars. `ssd sync` always rewrites per-channel sidecars (`channel.json`, `members.json`, pins, bookmarks, derived stats/files/…) and only creates missing workspace sidecars. `ssd query` reads them:
 
 ```
 auth.json users.json conversations.json emoji.json emoji_categories.json
@@ -118,7 +119,7 @@ ssd sync "#general" "#random"
 
 `--since` acts as a floor: messages older than this date are never re-fetched, but the cursor still advances normally as new messages arrive. If both a cursor and `--since` are set, the later of the two is used.
 
-New messages merge into existing `messages.json`: no duplicates, no overwrites. New replies to older messages are also picked up (each known thread is polled for replies newer than the last stored reply). Note: `ssd sync` on a channel also polls all known threads for new replies, which may make syncs slower on channels with many active threads.
+New messages merge by `ts` into existing `messages.json` (no duplicates). Incoming fields update the stored message; nested threads, reactions, and local attachment paths are preserved when a thin re-fetch omits them. New replies to older messages are also picked up (each known thread is polled for replies newer than the last stored reply). `ssd sync` on a channel also polls all known threads for new replies, which may make syncs slower on channels with many active threads.
 
 ## Watch a channel or DM
 
@@ -254,17 +255,17 @@ On a TTY, list commands print a table (`search`, `history`, `replies`, `threads`
 
 | Group | Commands |
 |---|---|
-| Messages | `search` `history` `replies` `message` `threads` `export` |
-| People | `users` `profile` `email` `identity` `members` `convos` `usergroups` `usergroup-users` `presence` `migration` |
-| Channels | `channels` `cursor` `stats` |
-| Files | `files` `files-info` `remote-files` `comments` |
-| Channel extras | `emoji` `pins` `stars` `bookmarks` `reactions` `calls` `participants` `scheduled` `reminders` `bots` |
-| Team | `team` `team-profile` `prefs` `auth` `teams` `external-teams` `access-logs` `integration-logs` `billable` `dnd` `rtm` |
-| Raw | `api` `permalink` |
+| Messages | `search` `history` `message` `replies` `threads` `cursor` `export` `reactions` `pins` `stars` `scheduled` `permalink` |
+| People | `users` `profile` `identity` `email` `presence` `dnd` `usergroups` `usergroup-users` |
+| Channels | `channels` `members` `convos` `bookmarks` |
+| Files | `files` `files-info` `remote-files` `comments` `emoji` |
+| Team | `team` `teams` `team-profile` `prefs` `external-teams` `auth` `access-logs` `billable` `integration-logs` `bots` `rtm` |
+| Extras | `stats` `calls` `participants` `reminders` |
+| Raw | `api` `migration` |
 
 Search (`ssd query search`, `search.messages`, `search.files`, `search.all`): substring plus `from:` `in:` `to:` `with:` `has:` `is:` `before:` `after:` `around:` `on:` `during:`, `from:me` / `to:me` / `with:me` / `in:me`, and `-term` exclusion. Relative dates on after/before/during: `today` `yesterday` `week` `month` `year` `lastweek` `lastmonth` `lastyear`. `has::emoji:` matches a named reaction.
 
-`has:` file, reaction, pin, link, canvas, image, video, audio, snippet, attachment, mention, space, block, email, call, x_files, pdf, replies, spreadsheet, metadata, remote, zip, presentation, list, doc, txt, button, gif, json, csv, xml, md, yaml, toml, html, svg, python, js, ts, go, rust, sql, css, sh, workflow, star.
+`has:` file, reaction, pin, link, canvas, image, video, audio, snippet, attachment, mention, space, block, email, call, x_files, pdf, replies, spreadsheet, metadata, remote, zip, presentation, list, doc, txt, button, gif, json, csv, xml, md, yaml, toml, html, svg, python, js, ts, go, rust, sql, css, sh, workflow. On message search, `has:star` / `has:stars` / `has:starred` alias to `is:starred`.
 
 `is:` on messages: thread, bot, starred/saved, edited, unthreaded, broadcast, locked, tombstone/deleted, app, file_share, me, hidden, join, leave, topic, purpose, parent, archive, unarchive, rename, subscribed, pinned, workflow, call/huddle, ephemeral, creator, delayed, scheduled, guest, admin, owner, app_user, me_message, stranger, invited, primary_owner, ultra_restricted, canvas, forgotten, enterprise, moved, connector, workflow_bot.
 
@@ -304,7 +305,7 @@ Without arguments, discovers all channel directories under `--output` (default: 
 
 On a TTY, opens the HTML in a browser unless `--no-open`. Nodes are users; edges represent message replies and mentions.
 
-Note: edges come from channel message threads, `@name` mentions, and `<@U...>` in `text_raw`. Standalone thread dumps (`thread_*/thread.json`) count toward user activity. If the dump stored the parent message, reply-to-author edges are recorded.
+Edges come from channel message threads, `@name` mentions, and `<@U...>` in `text_raw`. Standalone thread dumps (`thread_*/thread.json`) count toward user activity. If the dump stored the parent message, reply-to-author edges are recorded.
 
 ## All options
 
@@ -317,7 +318,7 @@ Options:
   --token TEXT                  Override auto-extracted token (or SSD_TOKEN env var)
   --output DIR                  Output directory (default: ./output)
   --config FILE                 Config file (default: ./ssd.toml)
-  --delay FLOAT                 Seconds between paginated batch fetches (not applied to individual API calls such as user lookups or per-thread reply fetches) (default: 1.0)
+  --delay FLOAT                 Seconds between paginated batch fetches and between per-thread reply fetches during sync; also the floor for watch via max(5, delay). Not applied to one-off calls such as user lookups (default: 1.0)
   --attachments / --no-attachments
 
 Commands:
@@ -357,7 +358,7 @@ Re-run `ssd token` if commands return `invalid_auth` (e.g. after signing out and
 Re-run `ssd token`. The session may have expired or the browser may not have been open when credentials were extracted.
 
 **`ssd token` prints a warning about cookie extraction failing:**
-The actual warning indicates cookie extraction failed from all sources: Slack's own Cookies file, Firefox, and Chrome. Make sure at least one browser is open and signed into the same Slack workspace, then re-run `ssd token`.
+Cookie extraction failed from Slack's own Cookies file, Firefox, and Chrome. Open a browser signed into the same Slack workspace and re-run `ssd token`. For Chrome on macOS, install the optional extra (`uv sync --extra chrome` or `uv tool install --extra chrome ...`) so AES cookie decryption is available.
 
 **Channel not found when using `ssd dump #name`:**
 Use the channel URL or bare ID instead. Name-based lookup pages through `conversations.list` which may time out on large workspaces.
@@ -373,7 +374,9 @@ The download failed (likely a permissions issue or the file was deleted from Sla
 ```bash
 git clone https://github.com/maci0/simpleslackdump
 cd simpleslackdump
-uv sync --group dev
+uv sync --locked --all-extras --group dev
 uv run pytest
 uv run ssd --help
+# CycloneDX inventory from the locked tree (also produced in CI):
+uv export --frozen --format cyclonedx1.5 --no-emit-workspace --all-extras --group dev -o sbom.cdx.json
 ```

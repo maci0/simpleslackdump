@@ -1,4 +1,9 @@
+"""TOML config load/store for tracked channels and threads."""
+
+import contextlib
 import dataclasses
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -42,10 +47,22 @@ def _filter_fields(dc_class: type, raw: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in raw.items() if k in valid}
 
 
+def _toml_table(items: list[tuple[str, Any]], *, skip_none: bool = False) -> Any:
+    table = tomlkit.table()
+    for key, value in items:
+        if skip_none and value is None:
+            continue
+        table.add(key, value)
+    return table
+
+
 def load_config(path: Path) -> Config:
     if not path.exists():
         return Config()
-    doc = tomlkit.loads(path.read_text())
+    try:
+        doc = tomlkit.loads(path.read_text())
+    except Exception as exc:
+        raise RuntimeError(f"Cannot parse config {path}: {exc}") from exc
     settings = Settings(**_filter_fields(Settings, doc.get("settings", {})))
     channels = [
         ChannelEntry(**_filter_fields(ChannelEntry, dict(ch))) for ch in doc.get("channels", [])
@@ -56,34 +73,56 @@ def load_config(path: Path) -> Config:
 
 def save_config(path: Path, config: Config) -> None:
     doc = tomlkit.document()
-    s = tomlkit.table()
-    s.add("output_dir", config.settings.output_dir)
-    s.add("token_file", config.settings.token_file)
-    s.add("attachments", config.settings.attachments)
-    doc.add("settings", s)
+    doc.add(
+        "settings",
+        _toml_table(
+            [
+                ("output_dir", config.settings.output_dir),
+                ("token_file", config.settings.token_file),
+                ("attachments", config.settings.attachments),
+            ]
+        ),
+    )
     if config.channels:
         aot = tomlkit.aot()
         for ch in config.channels:
-            t = tomlkit.table()
-            t.add("id", ch.id)
-            t.add("name", ch.name)
-            t.add("url", ch.url)
-            if ch.since:
-                t.add("since", ch.since)
-            if ch.attachments is not None:
-                t.add("attachments", ch.attachments)
-            aot.append(t)
+            aot.append(
+                _toml_table(
+                    [
+                        ("id", ch.id),
+                        ("name", ch.name),
+                        ("url", ch.url),
+                        ("since", ch.since),
+                        ("attachments", ch.attachments),
+                    ],
+                    skip_none=True,
+                )
+            )
         doc.add("channels", aot)
     if config.threads:
         aot = tomlkit.aot()
         for th in config.threads:
-            t = tomlkit.table()
-            t.add("channel_id", th.channel_id)
-            t.add("thread_ts", th.thread_ts)
-            t.add("url", th.url)
-            aot.append(t)
+            aot.append(
+                _toml_table(
+                    [
+                        ("channel_id", th.channel_id),
+                        ("thread_ts", th.thread_ts),
+                        ("url", th.url),
+                    ]
+                )
+            )
         doc.add("threads", aot)
-    path.write_text(tomlkit.dumps(doc))
+    content = tomlkit.dumps(doc)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp_ssd_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.replace(tmp, path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def add_channel(path: Path, *, id: str, name: str, url: str, since: str | None) -> None:
@@ -109,12 +148,10 @@ def remove_entry(path: Path, channel_id: str, thread_ts: str | None = None) -> b
     orig_ch = len(cfg.channels)
     orig_th = len(cfg.threads)
     if thread_ts:
-        # remove specific thread only
         cfg.threads = [
             t for t in cfg.threads if not (t.channel_id == channel_id and t.thread_ts == thread_ts)
         ]
     else:
-        # remove channel + all its threads
         cfg.channels = [ch for ch in cfg.channels if ch.id != channel_id]
         cfg.threads = [t for t in cfg.threads if t.channel_id != channel_id]
     if len(cfg.channels) == orig_ch and len(cfg.threads) == orig_th:

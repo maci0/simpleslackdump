@@ -1,4 +1,6 @@
-import glob as _glob
+"""Click entrypoint (`ssd` console script) and command wiring."""
+
+import os
 import sys
 import webbrowser
 from pathlib import Path
@@ -7,62 +9,119 @@ from typing import Any
 import click
 
 from ssd.api import SlackAPI
+from ssd.cli_format import print_watch_line
+from ssd.cli_query import query_cmd
+from ssd.dump import run_dump
 from ssd.sync import run_sync
+
+
+def _write_secret(path: Path, content: str) -> None:
+    """Write credentials with mode 0600 from creation (no world-readable window)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    # Re-assert in case the path already existed with looser permissions.
+    os.chmod(path, 0o600)
+
+
+def _token_path(output: Path, token_file: str | None) -> Path:
+    """Resolve token path under output; reject absolute/parent/multi-segment names.
+
+    ``settings.token_file`` is a filename inside output_dir. Absolute paths and
+    ``..`` segments would otherwise let a crafted ssd.toml write or read
+    credentials outside the dump tree (``Path(output) / "/etc/..."`` replaces
+    the base entirely).
+    """
+    name = str(token_file or ".token")
+    part = Path(name)
+    if (
+        part.is_absolute()
+        or len(part.parts) != 1
+        or part.parts[0] in (".", "..")
+        or "\x00" in name
+    ):
+        raise click.ClickException(
+            "settings.token_file must be a single filename inside output_dir "
+            f"(got {name!r})"
+        )
+    return output / part
 
 
 @click.group()
 @click.option("--token", envvar="SSD_TOKEN", default=None, help="Slack token override")
-@click.option("--output", default="./output", show_default=True, help="Output directory")
+@click.option(
+    "--output",
+    default=None,
+    help="Output directory (default: ./output or settings.output_dir)",
+)
 @click.option(
     "--config", "config_path", default="./ssd.toml", show_default=True, help="Path to config file"
 )
 @click.option("--attachments/--no-attachments", default=None)
-@click.option("--delay", default=1.0, show_default=True, help="Seconds between API calls")
+@click.option(
+    "--delay",
+    default=1.0,
+    show_default=True,
+    help="Seconds between paginated fetches and sync per-thread polls",
+)
 @click.pass_context
 def main(
     ctx: click.Context,
     token: str | None,
-    output: str,
+    output: str | None,
     config_path: str,
     attachments: bool | None,
     delay: float,
 ) -> None:
     """Dump Slack channels to JSON/Markdown. Query dumps locally with no Slack network."""
+    from ssd.config import load_config
+
     ctx.ensure_object(dict)
+    cfg = load_config(Path(config_path))
     ctx.obj["token"] = token
-    ctx.obj["output"] = output
+    ctx.obj["output"] = output if output is not None else cfg.settings.output_dir
+    ctx.obj["token_file"] = cfg.settings.token_file
     ctx.obj["config_path"] = config_path
     ctx.obj["attachments"] = attachments
     ctx.obj["delay"] = delay
+    ctx.obj["config"] = cfg
 
 
 @main.command()
 @click.pass_context
 def token(ctx: click.Context) -> None:
-    """Extract Slack token from macOS desktop app."""
+    """Extract Slack token and cookie from the macOS desktop app (or browser)."""
     from ssd.token import extract_cookie_with_validation, extract_token
 
     tok = extract_token()
     click.echo(tok, err=True)
     out = Path(ctx.obj["output"])
     out.mkdir(parents=True, exist_ok=True)
-    token_path = out / ".token"
-    token_path.write_text(tok)
-    token_path.chmod(0o600)
+    token_path = _token_path(out, ctx.obj.get("token_file"))
+    _write_secret(token_path, tok)
     click.echo(f"Token saved to {token_path}", err=True)
 
     click.echo("Validating cookie (Chrome may lag disk; retrying up to 3x)...", err=True)
     cookie = extract_cookie_with_validation(tok)
     if cookie:
         cookie_path = out / ".cookie"
-        cookie_path.write_text(cookie)
-        cookie_path.chmod(0o600)
+        _write_secret(cookie_path, cookie)
         click.echo(f"Cookie saved to {cookie_path}", err=True)
     else:
+        from ssd.token import missing_optional_extras
+
+        hint = ""
+        missing = missing_optional_extras()
+        if "chrome" in missing:
+            hint = (
+                " Chrome cookie decryption needs the chrome extra "
+                "(uv sync --extra chrome)."
+            )
         click.echo(
             "Warning: could not extract a valid d cookie from any source. "
             "Make sure Chrome or Firefox is open and signed into Slack, "
-            "then re-run ssd token.",
+            f"then re-run ssd token.{hint}",
             err=True,
         )
 
@@ -71,9 +130,9 @@ def _get_token(ctx_obj: dict[str, Any]) -> str:
     from ssd.token import extract_token
 
     tok = ctx_obj.get("token")
-    if tok:
+    if isinstance(tok, str) and tok:
         return tok
-    token_path = Path(ctx_obj["output"]) / ".token"
+    token_path = _token_path(Path(ctx_obj["output"]), ctx_obj.get("token_file"))
     if token_path.exists():
         return token_path.read_text().strip()
     return extract_token()
@@ -123,9 +182,7 @@ def _make_api(
         # Persist so the next call is warm
         out = Path(ctx_obj["output"])
         out.mkdir(parents=True, exist_ok=True)
-        cookie_path = out / ".cookie"
-        cookie_path.write_text(fresh_cookie)
-        cookie_path.chmod(0o600)
+        _write_secret(out / ".cookie", fresh_cookie)
         api = SlackAPI(token, delay=delay, cookie=fresh_cookie)
         workspace = api.get_workspace()
         cookie = fresh_cookie
@@ -155,8 +212,6 @@ def dump(
     delay: float | None,
 ) -> None:
     """Full history dump of channel(s)."""
-    from ssd.dump import run_dump
-
     delay = delay if delay is not None else ctx.obj.get("delay", 1.0)
     api, workspace, token, attach = _make_api(ctx.obj, delay)
     if dump_all or dump_dms:
@@ -258,7 +313,7 @@ def watch(
         for msg in api.watch_messages(
             ident, oldest=oldest, interval=interval, thread_ts=parsed.thread_ts
         ):
-            _print_watch_line(msg, as_json)
+            print_watch_line(msg, as_json)
     except KeyboardInterrupt:
         return
 
@@ -275,6 +330,7 @@ def add(ctx: click.Context, target: str) -> None:
     config_path = Path(ctx.obj["config_path"])
 
     if parsed.thread_ts:
+        assert parsed.channel_id is not None  # thread URLs always carry a channel id
         add_thread(
             config_path,
             channel_id=parsed.channel_id,
@@ -287,6 +343,7 @@ def add(ctx: click.Context, target: str) -> None:
         if parsed.channel_id:
             cid, name = api.resolve_channel(parsed.channel_id)
         else:
+            assert parsed.channel_name is not None  # parse_target always sets id or name
             cid, name = api.resolve_channel(parsed.channel_name)
         add_channel(
             config_path,
@@ -309,7 +366,7 @@ def remove(ctx: click.Context, target: str) -> None:
     parsed = parse_target(target)
     channel_id = parsed.channel_id
     if not channel_id and parsed.channel_name:
-        # Resolve name to ID from the config — avoids API call
+        # Resolve name to ID from the config (avoids API call)
         cfg = load_config(Path(ctx.obj["config_path"]))
         name = parsed.channel_name.lstrip("#")
         for ch in cfg.channels:
@@ -319,6 +376,7 @@ def remove(ctx: click.Context, target: str) -> None:
         if not channel_id:
             click.echo(f"Not found: {parsed.channel_name}", err=True)
             return
+    assert channel_id is not None  # guaranteed: either parsed or found in config above
     removed = remove_entry(Path(ctx.obj["config_path"]), channel_id, thread_ts=parsed.thread_ts)
     if removed:
         click.echo(f"Removed {channel_id}")
@@ -331,19 +389,26 @@ def remove(ctx: click.Context, target: str) -> None:
 def list_cmd(ctx: click.Context) -> None:
     """Show tracked channels and last sync time."""
     from ssd.config import load_config
+    from ssd.dumpload import discover
     from ssd.output import read_cursor
 
     cfg = load_config(Path(ctx.obj["config_path"]))
     if not cfg.channels and not cfg.threads:
         click.echo("No channels tracked. Use: ssd add <url>")
         return
+    # Match by channel id so a Slack rename that left {old-name}_{id} still shows last=.
+    dumps = discover(Path(ctx.obj["output"]))
     for ch in cfg.channels:
-        pattern = f"*/{_glob.escape(ch.name)}_{_glob.escape(ch.id)}"
-        matches = list(Path(ctx.obj["output"]).glob(pattern))
-        cursor = read_cursor(matches[0]) if matches else None
+        found = dumps.get(ch.id)
+        cursor = read_cursor(found.path) if found is not None else None
         click.echo(f"  #{ch.name} ({ch.id})  last={cursor or 'never'}")
     for th in cfg.threads:
-        click.echo(f"  thread {th.thread_ts} in {th.channel_id}")
+        found = dumps.get(th.channel_id)
+        cursor = None
+        if found is not None:
+            thread_dir = found.path / f"thread_{th.thread_ts.replace('.', '_')}"
+            cursor = read_cursor(thread_dir)
+        click.echo(f"  thread {th.thread_ts} in {th.channel_id}  last={cursor or 'never'}")
 
 
 @main.command()
@@ -400,12 +465,13 @@ def graph(
     Without arguments, uses all channel directories under the output dir.
     Opens the HTML in a browser on a TTY unless --no-open.
     """
+    from ssd.dumpload import discover
     from ssd.graph import build_graph, render_html
 
     dirs = [Path(d) for d in channel_dirs]
     if not dirs:
-        out = Path(ctx.obj["output"])
-        dirs = [p.parent for p in out.rglob("messages.json")]
+        # discover includes thread-only channel dirs (no messages.json yet).
+        dirs = [ch.path for ch in discover(Path(ctx.obj["output"])).values()]
     if not dirs:
         click.echo("No channel data found. Run 'ssd dump' first.", err=True)
         return
@@ -421,1660 +487,8 @@ def graph(
     if open_browser is None:
         open_browser = sys.stdout.isatty()
     if open_browser:
-        webbrowser.open(f"file://{str(Path(output).resolve())}")
+        webbrowser.open(f"file://{Path(output).resolve()!s}")
 
 
-def _json_pretty() -> bool:
-    return sys.stdout.isatty()
+main.add_command(query_cmd)
 
-
-def _print_watch_line(msg: dict[str, Any], as_json: bool) -> None:
-    if as_json or not _json_pretty():
-        import json
-
-        click.echo(json.dumps(msg, ensure_ascii=False))
-        return
-    user = msg.get("user_name") or msg.get("username") or msg.get("user") or ""
-    ts = msg.get("ts") or ""
-    text = " ".join(str(msg.get("text") or "").split())
-    click.echo(f"{user}  {ts}  {text}")
-
-
-def _print_json(data: Any) -> None:
-    pretty = _json_pretty()
-    try:
-        import orjson
-
-        opts = orjson.OPT_INDENT_2 if pretty else 0
-        click.echo(orjson.dumps(data, option=opts).decode())
-    except ImportError:
-        import json
-
-        click.echo(json.dumps(data, ensure_ascii=False, indent=2 if pretty else None))
-    if isinstance(data, dict) and data.get("ok") is False:
-        ctx = click.get_current_context(silent=True)
-        if ctx is not None:
-            ctx.exit(1)
-        raise SystemExit(1)
-
-
-def _want_table(ctx: click.Context) -> bool:
-    return _json_pretty() and not ctx.obj.get("query_json")
-
-
-def _cell(val: Any, width: int) -> str:
-    text = " ".join(str(val or "").split())
-    if len(text) > width:
-        text = text[: width - 3] + "..."
-    return text.ljust(width)
-
-
-def _print_table(rows: list[dict[str, str]], headers: tuple[str, ...]) -> None:
-    widths = {h: len(h) for h in headers}
-    for row in rows:
-        for key in headers:
-            cap = (
-                48
-                if key in {"text", "real_name", "name", "title", "handle", "url", "comment"}
-                else 24
-            )
-            widths[key] = max(widths[key], min(len(row.get(key) or ""), cap))
-    click.echo("  ".join(_cell(h, widths[h]) for h in headers).rstrip())
-    for row in rows:
-        click.echo("  ".join(_cell(row.get(h) or "", widths[h]) for h in headers).rstrip())
-
-
-def _print_list(
-    ctx: click.Context,
-    data: dict[str, Any],
-    key: str,
-    headers: tuple[str, ...],
-    row_fn: Any,
-) -> None:
-    if not _want_table(ctx):
-        _print_json(data)
-        return
-    rows: list[dict[str, str]] = []
-    for item in data.get(key) or []:
-        if isinstance(item, dict):
-            rows.append(row_fn(item))
-    _print_table(rows, headers)
-    if data.get("ok") is False:
-        ctx.exit(1)
-
-
-def _channel_cell(item: dict[str, Any], fallback: str = "") -> str:
-    ch = item.get("channel")
-    if isinstance(ch, dict):
-        return str(ch.get("name") or ch.get("id") or fallback)
-    if ch:
-        return str(ch)
-    return str(item.get("channel_id") or fallback)
-
-
-def _print_search(ctx: click.Context, data: dict[str, Any]) -> None:
-    if not _want_table(ctx):
-        _print_json(data)
-        return
-    rows: list[dict[str, str]] = []
-    messages = data.get("messages") or {}
-    for item in messages.get("matches") or []:
-        if not isinstance(item, dict):
-            continue
-        rows.append(
-            {
-                "channel": _channel_cell(item),
-                "user": str(
-                    item.get("username") or item.get("user_name") or item.get("user") or ""
-                ),
-                "ts": str(item.get("ts") or ""),
-                "text": str(item.get("text") or ""),
-            }
-        )
-    files = data.get("files") or {}
-    for item in files.get("matches") or []:
-        if not isinstance(item, dict):
-            continue
-        rows.append(
-            {
-                "channel": _channel_cell(item),
-                "user": str(item.get("user") or ""),
-                "ts": str(item.get("timestamp") or item.get("created") or item.get("ts") or ""),
-                "text": str(item.get("name") or item.get("title") or ""),
-            }
-        )
-    _print_table(rows, ("channel", "user", "ts", "text"))
-    if data.get("ok") is False:
-        ctx.exit(1)
-
-
-def _print_history(ctx: click.Context, data: dict[str, Any], channel: str) -> None:
-    if not _want_table(ctx):
-        _print_json(data)
-        return
-    rows: list[dict[str, str]] = []
-    for item in data.get("messages") or []:
-        if not isinstance(item, dict):
-            continue
-        rows.append(
-            {
-                "channel": _channel_cell(item, channel),
-                "user": str(
-                    item.get("user_name") or item.get("username") or item.get("user") or ""
-                ),
-                "ts": str(item.get("ts") or ""),
-                "text": str(item.get("text") or ""),
-            }
-        )
-    _print_table(rows, ("channel", "user", "ts", "text"))
-    if data.get("ok") is False:
-        ctx.exit(1)
-
-
-def _print_members(
-    ctx: click.Context, client: Any, data: dict[str, Any], key: str = "members"
-) -> None:
-    if not _want_table(ctx):
-        _print_json(data)
-        return
-    names: dict[str, str] = {}
-    for user in client.users_list().get("members") or []:
-        if isinstance(user, dict) and user.get("id"):
-            names[str(user["id"])] = str(user.get("name") or user.get("real_name") or "")
-    rows: list[dict[str, str]] = []
-    for uid in data.get(key) or []:
-        sid = (
-            str(uid)
-            if not isinstance(uid, dict)
-            else str(uid.get("id") or uid.get("slack_id") or "")
-        )
-        rows.append({"id": sid, "name": names.get(sid, "")})
-    _print_table(rows, ("id", "name"))
-    if data.get("ok") is False:
-        ctx.exit(1)
-
-
-def _print_threads(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(
-        ctx,
-        data,
-        "threads",
-        ("channel", "thread_ts", "replies"),
-        lambda t: {
-            "channel": _channel_cell(t),
-            "thread_ts": str(t.get("thread_ts") or ""),
-            "replies": str(t.get("reply_count") if t.get("reply_count") is not None else ""),
-        },
-    )
-
-
-def _channel_row(ch: dict[str, Any]) -> dict[str, str]:
-    return {
-        "id": str(ch.get("id") or ""),
-        "name": str(ch.get("name") or ""),
-        "private": "yes" if ch.get("is_private") else "",
-    }
-
-
-def _user_row(user: dict[str, Any]) -> dict[str, str]:
-    profile = user.get("profile") if isinstance(user.get("profile"), dict) else {}
-    return {
-        "id": str(user.get("id") or ""),
-        "name": str(user.get("name") or ""),
-        "real_name": str(user.get("real_name") or profile.get("real_name") or ""),
-    }
-
-
-def _file_row(file: dict[str, Any]) -> dict[str, str]:
-    return {
-        "id": str(file.get("id") or ""),
-        "name": str(file.get("name") or file.get("title") or ""),
-        "user": str(file.get("user") or ""),
-    }
-
-
-def _item_row(item: dict[str, Any]) -> dict[str, str]:
-    msg = item.get("message") if isinstance(item.get("message"), dict) else {}
-    return {
-        "channel": _channel_cell(item),
-        "user": str(
-            msg.get("user_name") or msg.get("username") or msg.get("user") or item.get("user") or ""
-        ),
-        "ts": str(msg.get("ts") or item.get("ts") or ""),
-        "text": str(msg.get("text") or item.get("text") or item.get("type") or ""),
-    }
-
-
-def _reaction_row(item: dict[str, Any]) -> dict[str, str]:
-    msg = item.get("message") if isinstance(item.get("message"), dict) else {}
-    return {
-        "channel": _channel_cell(item),
-        "user": str(item.get("user") or ""),
-        "reaction": str(item.get("reaction") or ""),
-        "text": str(msg.get("text") or ""),
-    }
-
-
-def _print_channels(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(ctx, data, "channels", ("id", "name", "private"), _channel_row)
-
-
-def _print_users(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(ctx, data, "members", ("id", "name", "real_name"), _user_row)
-
-
-def _print_files(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(ctx, data, "files", ("id", "name", "user"), _file_row)
-
-
-def _print_items(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(ctx, data, "items", ("channel", "user", "ts", "text"), _item_row)
-
-
-def _print_emoji(ctx: click.Context, data: dict[str, Any]) -> None:
-    if not _want_table(ctx):
-        _print_json(data)
-        return
-    raw = data.get("emoji") or {}
-    rows: list[dict[str, str]] = []
-    if isinstance(raw, dict):
-        for name, url in raw.items():
-            rows.append({"name": str(name), "url": str(url)})
-    else:
-        for item in raw:
-            if isinstance(item, dict):
-                rows.append(
-                    {"name": str(item.get("name") or ""), "url": str(item.get("url") or "")}
-                )
-    _print_table(rows, ("name", "url"))
-    if data.get("ok") is False:
-        ctx.exit(1)
-
-
-def _print_bookmarks(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(
-        ctx,
-        data,
-        "bookmarks",
-        ("id", "title", "channel"),
-        lambda b: {
-            "id": str(b.get("id") or ""),
-            "title": str(b.get("title") or ""),
-            "channel": str(b.get("channel_id") or b.get("channel") or ""),
-        },
-    )
-
-
-def _print_usergroups(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(
-        ctx,
-        data,
-        "usergroups",
-        ("id", "handle", "name"),
-        lambda g: {
-            "id": str(g.get("id") or ""),
-            "handle": str(g.get("handle") or ""),
-            "name": str(g.get("name") or ""),
-        },
-    )
-
-
-def _print_bots(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(
-        ctx,
-        data,
-        "bots",
-        ("id", "name"),
-        lambda b: {"id": str(b.get("id") or ""), "name": str(b.get("name") or "")},
-    )
-
-
-def _print_reactions(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(ctx, data, "items", ("channel", "user", "reaction", "text"), _reaction_row)
-
-
-def _print_scheduled(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(
-        ctx,
-        data,
-        "scheduled_messages",
-        ("id", "channel", "text"),
-        lambda m: {
-            "id": str(m.get("id") or ""),
-            "channel": _channel_cell(m),
-            "text": str(m.get("text") or ""),
-        },
-    )
-
-
-def _print_reminders(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(
-        ctx,
-        data,
-        "reminders",
-        ("id", "text"),
-        lambda r: {"id": str(r.get("id") or ""), "text": str(r.get("text") or "")},
-    )
-
-
-def _print_comments(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(
-        ctx,
-        data,
-        "comments",
-        ("id", "user", "comment"),
-        lambda c: {
-            "id": str(c.get("id") or ""),
-            "user": str(c.get("user") or ""),
-            "comment": str(c.get("comment") or c.get("text") or ""),
-        },
-    )
-
-
-def _print_calls(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(
-        ctx,
-        data,
-        "calls",
-        ("id", "name"),
-        lambda c: {"id": str(c.get("id") or ""), "name": str(c.get("name") or "")},
-    )
-
-
-def _print_logins(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(
-        ctx,
-        data,
-        "logins",
-        ("user_id", "ip"),
-        lambda r: {"user_id": str(r.get("user_id") or ""), "ip": str(r.get("ip") or "")},
-    )
-
-
-def _print_logs(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(
-        ctx,
-        data,
-        "logs",
-        ("user_id", "service_id"),
-        lambda r: {
-            "user_id": str(r.get("user_id") or ""),
-            "service_id": str(r.get("service_id") or ""),
-        },
-    )
-
-
-def _print_cursors(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(
-        ctx,
-        data,
-        "cursors",
-        ("channel", "ts"),
-        lambda r: {"channel": str(r.get("channel") or ""), "ts": str(r.get("ts") or "")},
-    )
-
-
-def _print_teams(ctx: click.Context, data: dict[str, Any]) -> None:
-    _print_list(
-        ctx,
-        data,
-        "teams",
-        ("id", "name"),
-        lambda t: {"id": str(t.get("id") or ""), "name": str(t.get("name") or "")},
-    )
-
-
-def _print_presence(ctx: click.Context, data: dict[str, Any]) -> None:
-    if not _want_table(ctx):
-        _print_json(data)
-        return
-    raw = data.get("users")
-    rows: list[dict[str, str]] = []
-    if isinstance(raw, dict):
-        for uid, val in raw.items():
-            presence = val.get("presence") if isinstance(val, dict) else val
-            rows.append({"user": str(uid), "presence": str(presence or "")})
-    else:
-        for item in raw or []:
-            if isinstance(item, dict):
-                rows.append(
-                    {
-                        "user": str(item.get("user_id") or item.get("user") or ""),
-                        "presence": str(item.get("presence") or ""),
-                    }
-                )
-    _print_table(rows, ("user", "presence"))
-    if data.get("ok") is False:
-        ctx.exit(1)
-
-
-def _client(ctx: click.Context) -> Any:
-    from ssd.dumpapi import DumpClient
-
-    path = Path(ctx.obj["output"])
-    try:
-        client = DumpClient(path)
-    except FileNotFoundError as exc:
-        raise click.UsageError(f"No dump at {path}. Run ssd dump, or pass --output.") from exc
-    if not client._channels:
-        click.echo(
-            f"No channels under {path}. Dump first, or point --output at a workspace or export.",
-            err=True,
-        )
-    return client
-
-
-_QUERY_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    (
-        "Messages",
-        (
-            "search",
-            "history",
-            "message",
-            "replies",
-            "threads",
-            "cursor",
-            "export",
-            "reactions",
-            "pins",
-            "stars",
-            "scheduled",
-            "permalink",
-        ),
-    ),
-    (
-        "People",
-        (
-            "users",
-            "profile",
-            "identity",
-            "email",
-            "presence",
-            "dnd",
-            "usergroups",
-            "usergroup-users",
-        ),
-    ),
-    ("Channels", ("channels", "members", "convos", "bookmarks")),
-    ("Files", ("files", "files-info", "remote-files", "comments", "emoji")),
-    (
-        "Team",
-        (
-            "team",
-            "teams",
-            "team-profile",
-            "prefs",
-            "external-teams",
-            "auth",
-            "access-logs",
-            "billable",
-            "integration-logs",
-            "bots",
-            "rtm",
-        ),
-    ),
-    ("Extras", ("stats", "calls", "participants", "reminders")),
-    ("Raw", ("api", "migration")),
-)
-
-
-class QueryGroup(click.Group):
-    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
-        listed: set[str] = set()
-        extras_rows: list[tuple[str, str]] = []
-        sections: list[tuple[str, list[tuple[str, str]]]] = []
-        for title, names in _QUERY_SECTIONS:
-            rows: list[tuple[str, str]] = []
-            for name in names:
-                cmd = self.get_command(ctx, name)
-                if cmd is None or cmd.hidden:
-                    continue
-                listed.add(name)
-                rows.append((name, cmd.get_short_help_str(limit=88)))
-            if title == "Extras":
-                extras_rows = rows
-            elif rows:
-                sections.append((title, rows))
-        for name in self.list_commands(ctx):
-            if name in listed:
-                continue
-            cmd = self.get_command(ctx, name)
-            if cmd is None or cmd.hidden:
-                continue
-            extras_rows.append((name, cmd.get_short_help_str(limit=88)))
-        extras_at = next(
-            (i for i, (title, _) in enumerate(sections) if title == "Raw"),
-            len(sections),
-        )
-        if extras_rows:
-            sections.insert(extras_at, ("Extras", extras_rows))
-        for title, rows in sections:
-            with formatter.section(title):
-                formatter.write_dl(rows)
-
-
-@main.group("query", cls=QueryGroup)
-@click.option("--json", "query_json", is_flag=True, help="Print JSON even on a TTY")
-@click.pass_context
-def query_cmd(ctx: click.Context, query_json: bool) -> None:
-    """Read local dump data. No Slack network."""
-    ctx.ensure_object(dict)
-    ctx.obj["query_json"] = query_json
-
-
-@query_cmd.command("stats", help="Channel and message counts")
-@click.pass_context
-def query_stats(ctx: click.Context) -> None:
-    _print_json(_client(ctx).stats())
-
-
-@query_cmd.command("search", help="Search messages and files (from:/in:/has:/is:)")
-@click.argument("q")
-@click.option("--count", default=20, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--sort-dir", default="desc")
-@click.pass_context
-def query_search(ctx: click.Context, q: str, count: int, page: int | None, sort_dir: str) -> None:
-    _print_search(
-        ctx,
-        _client(ctx).search_all(query=q, count=count, page=page, sort_dir=sort_dir),
-    )
-
-
-@query_cmd.command("history", help="conversations.history; --search filters that channel")
-@click.argument("channel")
-@click.option("--search", default=None)
-@click.option("--limit", default=100, type=int)
-@click.option("--oldest", default=None)
-@click.option("--latest", default=None)
-@click.option("--inclusive", is_flag=True)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_history(
-    ctx: click.Context,
-    channel: str,
-    search: str | None,
-    limit: int,
-    oldest: str | None,
-    latest: str | None,
-    inclusive: bool,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    kwargs: dict[str, Any] = {
-        "channel": channel,
-        "limit": limit,
-        "oldest": oldest,
-        "latest": latest,
-        "inclusive": inclusive,
-        "cursor": cursor,
-    }
-    if search:
-        _print_history(ctx, client.conversations_history_search(query=search, **kwargs), channel)
-        return
-    _print_history(ctx, client.conversations_history(**kwargs), channel)
-
-
-@query_cmd.command("cursor", help="Sync cursor ts; omit channel to list all")
-@click.argument("channel", required=False)
-@click.option("--search", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_cursor(
-    ctx: click.Context,
-    channel: str | None,
-    search: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if channel:
-        _print_json(client.get_cursor(channel=channel))
-        return
-    if search:
-        kwargs: dict[str, Any] = {"query": search}
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_cursors(ctx, client.cursors_search(**kwargs))
-        return
-    _print_cursors(ctx, client.cursors_list(count=count, page=page, cursor=cursor))
-
-
-@query_cmd.command("channels", help="conversations.list / info; --search filters")
-@click.argument("channel", required=False)
-@click.option("--search", default=None)
-@click.option("--exclude-archived", is_flag=True)
-@click.option("--types", default=None)
-@click.option("--limit", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_channels(
-    ctx: click.Context,
-    channel: str | None,
-    search: str | None,
-    exclude_archived: bool,
-    types: str | None,
-    limit: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if channel:
-        _print_json(client.conversations_info(channel=channel))
-        return
-    if search:
-        kwargs: dict[str, Any] = {
-            "query": search,
-            "exclude_archived": exclude_archived,
-            "types": types,
-        }
-        if limit is not None:
-            kwargs["limit"] = limit
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_channels(ctx, client.conversations_search(**kwargs))
-        return
-    kwargs = {"exclude_archived": exclude_archived, "types": types}
-    if limit is not None:
-        kwargs["limit"] = limit
-    if cursor is not None:
-        kwargs["cursor"] = cursor
-    _print_channels(ctx, client.conversations_list(**kwargs))
-
-
-@query_cmd.command("users", help="users.list / info; --search filters")
-@click.argument("user", required=False)
-@click.option("--search", default=None)
-@click.option("--message-users/--no-message-users", default=True)
-@click.option("--bots/--no-bots", default=True)
-@click.option("--deleted/--no-deleted", default=True)
-@click.option("--limit", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_users(
-    ctx: click.Context,
-    user: str | None,
-    search: str | None,
-    message_users: bool,
-    bots: bool,
-    deleted: bool,
-    limit: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if user:
-        _print_json(client.users_info(user=user))
-        return
-    if search:
-        kwargs: dict[str, Any] = {"query": search}
-        if limit is not None:
-            kwargs["limit"] = limit
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_users(ctx, client.users_search(**kwargs))
-        return
-    kwargs = {
-        "include_message_users": message_users,
-        "include_bots": bots,
-        "include_deleted": deleted,
-    }
-    if limit is not None:
-        kwargs["limit"] = limit
-    if cursor is not None:
-        kwargs["cursor"] = cursor
-    _print_users(ctx, client.users_list(**kwargs))
-
-
-@query_cmd.command("files", help="files.list / info; --search filters")
-@click.argument("file", required=False)
-@click.option("--search", default=None)
-@click.option("--channel", default=None)
-@click.option("--user", default=None)
-@click.option("--types", default=None, help="Comma-separated Slack filetypes")
-@click.option("--ts-from", default=None)
-@click.option("--ts-to", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_files(
-    ctx: click.Context,
-    file: str | None,
-    search: str | None,
-    channel: str | None,
-    user: str | None,
-    types: str | None,
-    ts_from: str | None,
-    ts_to: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if file:
-        _print_json(client.files_info(file=file))
-        return
-    kwargs: dict[str, Any] = {
-        "channel": channel,
-        "user": user,
-        "types": types,
-        "ts_from": ts_from,
-        "ts_to": ts_to,
-    }
-    if count is not None:
-        kwargs["count"] = count
-    if page is not None:
-        kwargs["page"] = page
-    if cursor is not None:
-        kwargs["cursor"] = cursor
-    if search:
-        _print_files(ctx, client.files_list_search(query=search, **kwargs))
-        return
-    _print_files(ctx, client.files_list(**kwargs))
-
-
-@query_cmd.command("remote-files", help="files.remote.list / info; --search filters")
-@click.argument("file_id", required=False)
-@click.option("--search", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_remote_files(
-    ctx: click.Context,
-    file_id: str | None,
-    search: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if search:
-        kwargs: dict[str, Any] = {"query": search}
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_files(ctx, client.files_remote_search(**kwargs))
-        return
-    if file_id:
-        _print_json(client.files_remote_info(file=file_id))
-        return
-    _print_files(ctx, client.files_remote_list(count=count, page=page, cursor=cursor))
-
-
-@query_cmd.command("message", help="One message by channel and ts")
-@click.argument("channel")
-@click.argument("ts")
-@click.pass_context
-def query_message(ctx: click.Context, channel: str, ts: str) -> None:
-    _print_json(_client(ctx).get_message(channel=channel, ts=ts))
-
-
-@query_cmd.command("export", help="Write messages as JSONL")
-@click.argument("dest", type=click.Path())
-@click.option("--channel", default=None)
-@click.pass_context
-def query_export(ctx: click.Context, dest: str, channel: str | None) -> None:
-    n = _client(ctx).export_jsonl(dest, channel=channel)
-    click.echo(str(n))
-
-
-@query_cmd.command("emoji", help="emoji.list / get; --search filters")
-@click.argument("name", required=False)
-@click.option("--search", default=None)
-@click.pass_context
-def query_emoji(ctx: click.Context, name: str | None, search: str | None) -> None:
-    client = _client(ctx)
-    if search:
-        _print_emoji(ctx, client.emoji_search(query=search))
-        return
-    if name:
-        _print_json(client.emoji_get(name=name))
-        return
-    _print_emoji(ctx, client.emoji_list())
-
-
-@query_cmd.command("identity", help="users.identity from auth.json")
-@click.pass_context
-def query_identity(ctx: click.Context) -> None:
-    _print_json(_client(ctx).users_identity())
-
-
-@query_cmd.command("auth", help="auth.test from auth.json")
-@click.pass_context
-def query_auth(ctx: click.Context) -> None:
-    _print_json(_client(ctx).auth_test())
-
-
-@query_cmd.command("teams", help="auth.teams.list; --search filters")
-@click.option("--search", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_teams(
-    ctx: click.Context,
-    search: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if search:
-        kwargs: dict[str, Any] = {"query": search}
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_teams(ctx, client.auth_teams_search(**kwargs))
-        return
-    _print_teams(ctx, client.auth_teams_list(count=count, page=page, cursor=cursor))
-
-
-@query_cmd.command("rtm", help="rtm.connect snapshot; --start for rtm.start")
-@click.option("--start", is_flag=True)
-@click.pass_context
-def query_rtm(ctx: click.Context, start: bool) -> None:
-    client = _client(ctx)
-    if start:
-        _print_json(client.rtm_start())
-        return
-    _print_json(client.rtm_connect())
-
-
-@query_cmd.command("team-profile", help="team.profile.get; --search filters")
-@click.option("--search", default=None)
-@click.pass_context
-def query_team_profile(ctx: click.Context, search: str | None) -> None:
-    client = _client(ctx)
-    if search:
-        _print_json(client.team_profile_search(query=search))
-        return
-    _print_json(client.team_profile_get())
-
-
-@query_cmd.command("prefs", help="team.preferences; --search filters")
-@click.option("--search", default=None)
-@click.pass_context
-def query_prefs(ctx: click.Context, search: str | None) -> None:
-    client = _client(ctx)
-    if search:
-        _print_json(client.team_preferences_search(query=search))
-        return
-    _print_json(client.team_preferences_list())
-
-
-@query_cmd.command("external-teams", help="team.externalTeams; --search filters")
-@click.option("--search", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_external_teams(
-    ctx: click.Context,
-    search: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if search:
-        kwargs: dict[str, Any] = {"query": search}
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_teams(ctx, client.team_externalTeams_search(**kwargs))
-        return
-    _print_teams(ctx, client.team_externalTeams_list(count=count, page=page, cursor=cursor))
-
-
-@query_cmd.command("profile", help="users.profile.get")
-@click.argument("user")
-@click.pass_context
-def query_profile(ctx: click.Context, user: str) -> None:
-    _print_json(_client(ctx).users_profile_get(user=user))
-
-
-@query_cmd.command("pins", help="pins.list / info; --search filters")
-@click.argument("channel", required=False)
-@click.argument("ts", required=False)
-@click.option("--search", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_pins(
-    ctx: click.Context,
-    channel: str | None,
-    ts: str | None,
-    search: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if channel and ts:
-        _print_json(client.pins_info(channel=channel, ts=ts))
-        return
-    if search:
-        kwargs: dict[str, Any] = {"query": search, "channel": channel}
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_items(ctx, client.pins_search(**kwargs))
-        return
-    _print_items(ctx, client.pins_list(channel=channel, count=count, page=page, cursor=cursor))
-
-
-@query_cmd.command("scheduled", help="chat.scheduledMessages; --search filters")
-@click.argument("scheduled_id", required=False)
-@click.option("--search", default=None)
-@click.option("--channel", default=None)
-@click.option("--oldest", default=None)
-@click.option("--latest", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_scheduled(
-    ctx: click.Context,
-    scheduled_id: str | None,
-    search: str | None,
-    channel: str | None,
-    oldest: str | None,
-    latest: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if scheduled_id:
-        _print_json(client.chat_scheduledMessages_info(id=scheduled_id))
-        return
-    if search:
-        kwargs: dict[str, Any] = {"query": search, "channel": channel}
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_scheduled(ctx, client.chat_scheduledMessages_search(**kwargs))
-        return
-    _print_scheduled(
-        ctx,
-        client.chat_scheduledMessages_list(
-            channel=channel, oldest=oldest, latest=latest, count=count, page=page, cursor=cursor
-        ),
-    )
-
-
-@query_cmd.command("threads", help="Thread index; --search filters")
-@click.argument("channel", required=False)
-@click.argument("ts", required=False)
-@click.option("--search", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_threads(
-    ctx: click.Context,
-    channel: str | None,
-    ts: str | None,
-    search: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if channel and ts:
-        _print_json(client.threads_info(channel=channel, ts=ts))
-        return
-    if search:
-        kwargs: dict[str, Any] = {"query": search, "channel": channel}
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_threads(ctx, client.threads_search(**kwargs))
-        return
-    _print_threads(ctx, client.threads_list(channel=channel, count=count, page=page, cursor=cursor))
-
-
-@query_cmd.command("replies", help="conversations.replies; --search filters")
-@click.argument("channel")
-@click.argument("ts")
-@click.option("--search", default=None)
-@click.option("--oldest", default=None)
-@click.option("--latest", default=None)
-@click.option("--inclusive", is_flag=True)
-@click.option("--limit", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_replies(
-    ctx: click.Context,
-    channel: str,
-    ts: str,
-    search: str | None,
-    oldest: str | None,
-    latest: str | None,
-    inclusive: bool,
-    limit: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    kwargs: dict[str, Any] = {
-        "channel": channel,
-        "ts": ts,
-        "oldest": oldest,
-        "latest": latest,
-        "inclusive": inclusive,
-    }
-    if limit is not None:
-        kwargs["limit"] = limit
-    if cursor is not None:
-        kwargs["cursor"] = cursor
-    if search:
-        _print_history(ctx, client.conversations_replies_search(query=search, **kwargs), channel)
-        return
-    _print_history(ctx, client.conversations_replies(**kwargs), channel)
-
-
-@query_cmd.command("stars", help="stars.list / info; --search filters")
-@click.argument("channel", required=False)
-@click.argument("ts", required=False)
-@click.option("--channel", "channel_opt", default=None)
-@click.option("--search", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_stars(
-    ctx: click.Context,
-    channel: str | None,
-    ts: str | None,
-    channel_opt: str | None,
-    search: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if channel and ts:
-        _print_json(client.stars_info(channel=channel, ts=ts))
-        return
-    if search:
-        kwargs: dict[str, Any] = {"query": search, "channel": channel_opt or channel}
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_items(ctx, client.stars_search(**kwargs))
-        return
-    _print_items(
-        ctx,
-        client.stars_list(channel=channel_opt or channel, count=count, page=page, cursor=cursor),
-    )
-
-
-@query_cmd.command("reminders", help="reminders.list / info; --search filters")
-@click.argument("reminder", required=False)
-@click.option("--search", default=None)
-@click.option("--complete/--no-complete", default=True)
-@click.option("--user", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_reminders(
-    ctx: click.Context,
-    reminder: str | None,
-    search: str | None,
-    complete: bool,
-    user: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if reminder:
-        _print_json(client.reminders_info(reminder=reminder))
-        return
-    if search:
-        kwargs: dict[str, Any] = {
-            "query": search,
-            "include_complete": complete,
-            "user": user,
-        }
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_reminders(ctx, client.reminders_search(**kwargs))
-        return
-    _print_reminders(
-        ctx,
-        client.reminders_list(
-            include_complete=complete, user=user, count=count, page=page, cursor=cursor
-        ),
-    )
-
-
-@query_cmd.command("usergroups", help="usergroups.list / info; --search filters")
-@click.argument("usergroup", required=False)
-@click.option("--search", default=None)
-@click.option("--include-disabled", is_flag=True)
-@click.option("--include-count", is_flag=True)
-@click.option("--no-users", is_flag=True)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_usergroups(
-    ctx: click.Context,
-    usergroup: str | None,
-    search: str | None,
-    include_disabled: bool,
-    include_count: bool,
-    no_users: bool,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if usergroup:
-        _print_json(client.usergroups_info(usergroup=usergroup))
-        return
-    if search:
-        kwargs: dict[str, Any] = {"query": search, "include_disabled": include_disabled}
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_usergroups(ctx, client.usergroups_search(**kwargs))
-        return
-    _print_usergroups(
-        ctx,
-        client.usergroups_list(
-            include_disabled=include_disabled,
-            include_count=include_count,
-            include_users=not no_users,
-            count=count,
-            page=page,
-            cursor=cursor,
-        ),
-    )
-
-
-@query_cmd.command("presence", help="users.getPresence; --search or --all")
-@click.argument("user", required=False, default=None)
-@click.option("--search", default=None)
-@click.option("--all", "all_users", is_flag=True)
-@click.pass_context
-def query_presence(
-    ctx: click.Context, user: str | None, search: str | None, all_users: bool
-) -> None:
-    client = _client(ctx)
-    if search:
-        _print_presence(ctx, client.presence_search(query=search))
-        return
-    if all_users:
-        _print_presence(ctx, {"ok": True, "users": list(client.iter_presence())})
-        return
-    _print_json(client.users_getPresence(user=user))
-
-
-@query_cmd.command("access-logs", help="team.accessLogs; --search filters")
-@click.option("--search", default=None)
-@click.option("--user", default=None)
-@click.option("--after", default=None)
-@click.option("--before", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_access_logs(
-    ctx: click.Context,
-    search: str | None,
-    user: str | None,
-    after: str | None,
-    before: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if search:
-        kwargs: dict[str, Any] = {
-            "query": search,
-            "user": user,
-            "after": after,
-            "before": before,
-        }
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_logins(ctx, client.team_accessLogs_search(**kwargs))
-        return
-    _print_logins(
-        ctx,
-        client.team_accessLogs(
-            user=user, after=after, before=before, count=count, page=page, cursor=cursor
-        ),
-    )
-
-
-@query_cmd.command("team", help="team.info")
-@click.pass_context
-def query_team(ctx: click.Context) -> None:
-    _print_json(_client(ctx).team_info())
-
-
-@query_cmd.command("bots", help="bots.list / info; --search filters")
-@click.argument("bot", required=False)
-@click.option("--search", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_bots(
-    ctx: click.Context,
-    bot: str | None,
-    search: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if search:
-        kwargs: dict[str, Any] = {"query": search}
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_bots(ctx, client.bots_search(**kwargs))
-        return
-    if bot:
-        _print_json(client.bots_info(bot=bot))
-        return
-    _print_bots(ctx, client.bots_list(count=count, page=page, cursor=cursor))
-
-
-@query_cmd.command("members", help="conversations.members; --search filters")
-@click.argument("channel")
-@click.option("--search", default=None)
-@click.option("--limit", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_members(
-    ctx: click.Context,
-    channel: str,
-    search: str | None,
-    limit: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    kwargs: dict[str, Any] = {"channel": channel}
-    if limit is not None:
-        kwargs["limit"] = limit
-    if cursor is not None:
-        kwargs["cursor"] = cursor
-    if search:
-        _print_members(ctx, client, client.conversations_members_search(query=search, **kwargs))
-        return
-    _print_members(ctx, client, client.conversations_members(**kwargs))
-
-
-@query_cmd.command("convos", help="users.conversations; --search filters")
-@click.argument("user")
-@click.option("--search", default=None)
-@click.option("--types", default=None)
-@click.option("--exclude-archived", is_flag=True)
-@click.option("--limit", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_convos(
-    ctx: click.Context,
-    user: str,
-    search: str | None,
-    types: str | None,
-    exclude_archived: bool,
-    limit: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    kwargs: dict[str, Any] = {
-        "user": user,
-        "types": types,
-        "exclude_archived": exclude_archived,
-    }
-    if limit is not None:
-        kwargs["limit"] = limit
-    if cursor is not None:
-        kwargs["cursor"] = cursor
-    if search:
-        _print_channels(ctx, client.users_conversations_search(query=search, **kwargs))
-        return
-    _print_channels(ctx, client.users_conversations(**kwargs))
-
-
-@query_cmd.command("reactions", help="reactions.get / list; --search filters")
-@click.argument("channel", required=False)
-@click.argument("ts", required=False)
-@click.option("--search", default=None)
-@click.option("--user", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_reactions(
-    ctx: click.Context,
-    channel: str | None,
-    ts: str | None,
-    search: str | None,
-    user: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if channel and ts:
-        _print_json(client.reactions_get(channel=channel, timestamp=ts))
-        return
-    if search:
-        kwargs: dict[str, Any] = {"query": search, "channel": channel, "user": user}
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_reactions(ctx, client.reactions_search(**kwargs))
-        return
-    _print_reactions(
-        ctx,
-        client.reactions_list(channel=channel, user=user, count=count, page=page, cursor=cursor),
-    )
-
-
-@query_cmd.command("dnd", help="dnd.info / teamInfo; --search filters")
-@click.argument("user", required=False, default=None)
-@click.option("--search", default=None)
-@click.option("--users", default=None, help="Comma-separated user ids for dnd.teamInfo")
-@click.pass_context
-def query_dnd(ctx: click.Context, user: str | None, search: str | None, users: str | None) -> None:
-    client = _client(ctx)
-    if search:
-        _print_json(client.dnd_search(query=search, users=users or user))
-        return
-    if users is not None:
-        _print_json(client.dnd_teamInfo(users=users or None))
-        return
-    _print_json(client.dnd_info(user=user))
-
-
-@query_cmd.command("comments", help="files.comments; --search filters")
-@click.argument("file_id")
-@click.option("--search", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_comments(
-    ctx: click.Context,
-    file_id: str,
-    search: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if search:
-        kwargs: dict[str, Any] = {"file": file_id, "query": search}
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_comments(ctx, client.files_comments_search(**kwargs))
-        return
-    _print_comments(ctx, client.files_comments(file=file_id, count=count, page=page, cursor=cursor))
-
-
-@query_cmd.command("email", help="users.lookupByEmail")
-@click.argument("addr")
-@click.pass_context
-def query_email(ctx: click.Context, addr: str) -> None:
-    _print_json(_client(ctx).users_lookupByEmail(email=addr))
-
-
-@query_cmd.command("files-info", help="files.info")
-@click.argument("file_id")
-@click.pass_context
-def query_files_info(ctx: click.Context, file_id: str) -> None:
-    _print_json(_client(ctx).files_info(file=file_id))
-
-
-@query_cmd.command("usergroup-users", help="usergroups.users; --search filters")
-@click.argument("handle")
-@click.option("--search", default=None)
-@click.option("--limit", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_usergroup_users(
-    ctx: click.Context,
-    handle: str,
-    search: str | None,
-    limit: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    kwargs: dict[str, Any] = {"usergroup": handle}
-    if limit is not None:
-        kwargs["limit"] = limit
-    if cursor is not None:
-        kwargs["cursor"] = cursor
-    if search:
-        _print_members(ctx, client, client.usergroups_users_search(query=search, **kwargs), "users")
-        return
-    _print_members(ctx, client, client.usergroups_users(**kwargs), "users")
-
-
-@query_cmd.command("calls", help="calls.list / info; --search filters")
-@click.argument("call_id", required=False)
-@click.option("--search", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_calls(
-    ctx: click.Context,
-    call_id: str | None,
-    search: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if search:
-        kwargs: dict[str, Any] = {"query": search}
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_calls(ctx, client.calls_search(**kwargs))
-        return
-    if call_id:
-        _print_json(client.calls_info(id=call_id))
-        return
-    _print_calls(ctx, client.calls_list(count=count, page=page, cursor=cursor))
-
-
-@query_cmd.command("participants", help="calls.participants; --search filters")
-@click.argument("call_id")
-@click.option("--search", default=None)
-@click.pass_context
-def query_participants(ctx: click.Context, call_id: str, search: str | None) -> None:
-    client = _client(ctx)
-    if search:
-        _print_members(
-            ctx, client, client.calls_participants_search(id=call_id, query=search), "participants"
-        )
-        return
-    _print_members(ctx, client, client.calls_participants(id=call_id), "participants")
-
-
-@query_cmd.command("billable", help="team.billableInfo; --search filters")
-@click.option("--search", default=None)
-@click.option("--user", default=None)
-@click.pass_context
-def query_billable(ctx: click.Context, search: str | None, user: str | None) -> None:
-    client = _client(ctx)
-    if search:
-        _print_json(client.team_billableInfo_search(query=search, user=user))
-        return
-    _print_json(client.team_billableInfo(user=user))
-
-
-@query_cmd.command("integration-logs", help="team.integrationLogs; --search filters")
-@click.option("--search", default=None)
-@click.option("--user", default=None)
-@click.option("--change-type", default=None)
-@click.option("--app-id", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_integration_logs(
-    ctx: click.Context,
-    search: str | None,
-    user: str | None,
-    change_type: str | None,
-    app_id: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if search:
-        kwargs: dict[str, Any] = {
-            "query": search,
-            "user": user,
-            "change_type": change_type,
-            "app_id": app_id,
-        }
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_logs(ctx, client.team_integrationLogs_search(**kwargs))
-        return
-    _print_logs(
-        ctx,
-        client.team_integrationLogs(
-            user=user,
-            change_type=change_type,
-            app_id=app_id,
-            count=count,
-            page=page,
-            cursor=cursor,
-        ),
-    )
-
-
-@query_cmd.command("bookmarks", help="bookmarks.list / info; --search filters")
-@click.argument("channel", required=False)
-@click.option("--search", default=None)
-@click.option("--count", default=None, type=int)
-@click.option("--page", default=None, type=int)
-@click.option("--cursor", default=None)
-@click.pass_context
-def query_bookmarks(
-    ctx: click.Context,
-    channel: str | None,
-    search: str | None,
-    count: int | None,
-    page: int | None,
-    cursor: str | None,
-) -> None:
-    client = _client(ctx)
-    if channel and channel.startswith("Bk"):
-        _print_json(client.bookmarks_info(bookmark=channel))
-        return
-    if search:
-        kwargs: dict[str, Any] = {"query": search, "channel": channel}
-        if count is not None:
-            kwargs["count"] = count
-        if page is not None:
-            kwargs["page"] = page
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        _print_bookmarks(ctx, client.bookmarks_search(**kwargs))
-        return
-    _print_bookmarks(
-        ctx, client.bookmarks_list(channel=channel, count=count, page=page, cursor=cursor)
-    )
-
-
-@query_cmd.command("permalink", help="chat.getPermalink")
-@click.argument("channel")
-@click.argument("ts")
-@click.pass_context
-def query_permalink(ctx: click.Context, channel: str, ts: str) -> None:
-    _print_json(_client(ctx).chat_getPermalink(channel=channel, message_ts=ts))
-
-
-@query_cmd.command("api", help="Call a DumpClient method by Slack name (key=value)")
-@click.argument("method")
-@click.argument("args", nargs=-1)
-@click.pass_context
-def query_api(ctx: click.Context, method: str, args: tuple[str, ...]) -> None:
-    payload: dict[str, Any] = {}
-    for item in args:
-        key, sep, val = item.partition("=")
-        if not sep:
-            raise click.UsageError(f"expected key=value, got {item}")
-        payload[key] = val
-    _print_json(_client(ctx).api_call(method, params=payload))
-
-
-@query_cmd.command("migration", help="migration.exchange")
-@click.argument("users")
-@click.pass_context
-def query_migration(ctx: click.Context, users: str) -> None:
-    _print_json(_client(ctx).migration_exchange(users=users))

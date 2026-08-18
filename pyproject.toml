@@ -2,18 +2,25 @@
 name = "ssd"
 version = "0.1.0"
 description = "simpleslackdump - dump Slack channels to JSON/Markdown and query the dump locally"
+readme = "README.md"
 requires-python = ">=3.11"
+# Runtime deps are intentionally small. HTTP uses stdlib urllib; AES/LevelDB are extras.
 dependencies = [
-    "slack-sdk>=3.27",
-    "click>=8.1",
-    "tomlkit>=0.13",
-    "requests>=2.31",
-    "cryptography>=42.0",
-    "orjson>=3.12.0",
+    "slack-sdk>=3.27",  # live Slack Web API client
+    "click>=8.1",  # CLI
+    "tomlkit>=0.13",  # read/write ssd.toml (stdlib tomllib is read-only)
+    "orjson>=3.12.0",  # fast dump JSON read/write
 ]
 
 [project.optional-dependencies]
-leveldb = ["plyvel>=1.5"]
+# Prefer: uv sync --locked --extra leveldb --extra chrome
+leveldb = ["plyvel>=1.5"]  # Slack Local Storage; raw .ldb scan works without it
+chrome = ["cryptography>=42.0"]  # decrypt Chrome's Slack d cookie on macOS
+
+[project.urls]
+Homepage = "https://github.com/maci0/simpleslackdump"
+Repository = "https://github.com/maci0/simpleslackdump"
+Issues = "https://github.com/maci0/simpleslackdump/issues"
 
 [project.scripts]
 ssd = "ssd.cli:main"
@@ -24,29 +31,97 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
-    "black>=26.5.1",
     "pytest>=8.0",
     "pytest-mock>=3.12",
     "ruff>=0.15.18",
+    "mypy>=1.11",
 ]
+
+[tool.mypy]
+python_version = "3.11"
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+disallow_untyped_calls = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_any_unimported = true
+no_implicit_optional = true
+no_implicit_reexport = true
+strict_equality = true
+extra_checks = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+warn_unused_configs = true
+# Only optional extras lack stubs; do not blanket-ignore every third-party import.
+ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
+# Optional extras (chrome / leveldb); packages may be absent and have no stubs.
+module = [
+    "plyvel",
+    "cryptography.*",
+]
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "ANN"]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+    "ANN",
+    "W",
+    "C4",
+    "PIE",
+    "ISC",
+    "FLY",
+    "PT",
+    "DTZ",
+    "LOG",
+    "G",
+    "SLOT",
+    "ERA",
+    "RSE",
+    "RUF",
+    "YTT",
+    "RET",
+    "PGH",
+    "EXE",
+    "FA",
+    "ICN",
+    "INP",
+    "ASYNC",
+    "T100",
+    "A",
+    "PLE",
+    "PLW",
+    "TID",
+    "INT",
+    "FIX",
+    "TD",
+    "S603",
+]
 ignore = [
-    "ANN204",            # __init__ return type implied None
-    "ANN401",            # Dynamically typed expressions (Any)
-    "B008",              # Do not perform function calls in default arguments (click uses this)
-    "SIM108",            # Ternary operator (sometimes less readable)
+    "ANN204",  # __init__ return type implied None
+    "ANN401",  # Dynamically typed expressions (Any); JSON/Slack payloads
+    "A002",  # Slack/API kwargs intentionally named `id`
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN"]
+# Embedded HTML/CSS/JS strings in the graph renderer exceed 100 columns.
 "ssd/graph.py" = ["E501"]
 
-[tool.black]
-line-length = 100
-target-version = ["py311"]
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"

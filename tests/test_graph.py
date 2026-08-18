@@ -123,7 +123,11 @@ def test_build_graph_excludes_unknown(tmp_path):
         ],
     )
     g = build_graph([tmp_path])
-    assert all(n["id"] != "unknown" for n in g["nodes"])
+    ids = {n["id"] for n in g["nodes"]}
+    assert "unknown" not in ids
+    assert ids == {"alice"}
+    alice = next(n for n in g["nodes"] if n["id"] == "alice")
+    assert alice["messages"] == 1
 
 
 def test_build_graph_no_self_edges(tmp_path):
@@ -140,7 +144,8 @@ def test_build_graph_no_self_edges(tmp_path):
         ],
     )
     g = build_graph([tmp_path])
-    assert not any(lnk["source"] == lnk["target"] for lnk in g["links"])
+    assert {n["id"] for n in g["nodes"]} == {"alice"}
+    assert g["links"] == []
 
 
 def test_build_graph_reads_thread_dumps(tmp_path):
@@ -215,6 +220,39 @@ def test_build_graph_skips_thread_dump_when_parent_in_messages(tmp_path):
     assert bob["replies"] == 1
 
 
+def test_build_graph_merges_extra_replies_from_thread_dump(tmp_path):
+    _write_messages(
+        tmp_path,
+        [
+            {
+                "ts": "1.0",
+                "user_name": "alice",
+                "text": "root",
+                "thread": [
+                    {"ts": "1.1", "user_name": "bob", "text": "reply", "files": []},
+                ],
+                "files": [],
+            }
+        ],
+    )
+    thread_dir = tmp_path / "thread_1_0"
+    thread_dir.mkdir()
+    (thread_dir / "thread.json").write_text(
+        json.dumps(
+            [
+                {"ts": "1.0", "user_name": "alice", "text": "root", "files": []},
+                {"ts": "1.1", "user_name": "bob", "text": "reply", "files": []},
+                {"ts": "1.2", "user_name": "carol", "text": "extra", "files": []},
+            ]
+        )
+    )
+    g = build_graph([tmp_path])
+    carol = next(n for n in g["nodes"] if n["id"] == "carol")
+    assert carol["replies"] == 1
+    links = {(lnk["source"], lnk["target"]) for lnk in g["links"]}
+    assert ("carol", "alice") in links
+
+
 def test_render_html_escapes_script_injection(tmp_path):
     injection = "</script><script>alert(1)</script>"
     g = {
@@ -224,7 +262,23 @@ def test_render_html_escapes_script_injection(tmp_path):
     }
     html = render_html(g)
     assert "</script><script>" not in html
-    assert "\\u003c/script\\u003e" in html or "\\u003c" in html
+    assert "\\u003c/script\\u003e" in html
+    assert "\\u003cscript\\u003e" in html
+
+
+def test_render_html_escapes_channel_names_in_sidebar():
+    """Channel dir names are interpolated into HTML; must not become markup."""
+    g = {
+        "nodes": [{"id": "alice", "messages": 1, "replies": 0}],
+        "links": [],
+        "channels": ["<img src=x onerror=alert(1)>_C123", "general_C456"],
+    }
+    html = render_html(g, title="</title><script>alert(1)</script>")
+    assert "<img src=x" not in html
+    assert "</title><script>" not in html
+    assert "&lt;img src=x onerror=alert(1)&gt;_C123" in html
+    assert "&lt;/title&gt;" in html
+    assert "general_C456" in html
 
 
 def test_mention_candidates_strips_punctuation():

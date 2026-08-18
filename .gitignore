@@ -7,5 +7,10 @@ dist/
 .ruff_cache/
 *.token
 *.cookie
+.token
+.cookie
 output/
 .claude/
+sbom.cdx.json
+sbom-requirements.txt
+sbom-requirements-dev.txt

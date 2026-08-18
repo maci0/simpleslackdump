@@ -108,6 +108,38 @@ def test_run_dump_writes_messages(tmp_path, mock_api):
     assert data[0]["text"] == "hi"
 
 
+def test_run_dump_empty_refetch_preserves_archive(tmp_path, mock_api):
+    run_dump(mock_api, "testteam", "C123", str(tmp_path))
+    mock_api.get_messages.return_value = []
+    mock_api.enrich.return_value = []
+    run_dump(mock_api, "testteam", "C123", str(tmp_path))
+    out_dir = tmp_path / "testteam" / "general_C123"
+    data = json.loads((out_dir / "messages.json").read_text())
+    assert len(data) == 1
+    assert data[0]["text"] == "hi"
+
+
+def test_run_dump_merges_instead_of_overwriting(tmp_path, mock_api):
+    run_dump(mock_api, "testteam", "C123", str(tmp_path))
+    mock_api.get_messages.return_value = [
+        {"ts": "1705320800.000000", "user": "U2", "text": "later", "reply_count": 0}
+    ]
+    mock_api.enrich.return_value = [
+        {
+            "ts": "1705320800.000000",
+            "user": "U2",
+            "user_name": "bob",
+            "text": "later",
+            "reactions": [],
+            "thread": [],
+        }
+    ]
+    run_dump(mock_api, "testteam", "C123", str(tmp_path))
+    out_dir = tmp_path / "testteam" / "general_C123"
+    data = json.loads((out_dir / "messages.json").read_text())
+    assert [m["ts"] for m in data] == ["1705320720.000000", "1705320800.000000"]
+
+
 def test_run_dump_prefetches_users_before_enrich(tmp_path, mock_api):
     order: list[str] = []
     users_ret = mock_api.fetch_workspace_users.return_value
@@ -125,6 +157,98 @@ def test_run_dump_cursor_is_latest_ts(tmp_path, mock_api):
     out_dir = tmp_path / "testteam" / "general_C123"
     cursor = (out_dir / ".cursor").read_text().strip()
     assert cursor == "1705320720.000000"
+
+
+def test_run_dump_partial_refetch_keeps_archive_cursor(tmp_path, mock_api):
+    """A partial re-fetch must not rewind .cursor below messages still in the archive."""
+    from ssd.output import channel_dir, write_cursor, write_messages
+
+    out_dir = channel_dir(str(tmp_path), "testteam", "general", "C123")
+    write_messages(
+        out_dir,
+        [
+            {
+                "ts": "1705320720.000000",
+                "user_name": "alice",
+                "text": "old",
+                "reactions": [],
+                "files": [],
+                "thread": [],
+            },
+            {
+                "ts": "1705320900.000000",
+                "user_name": "carol",
+                "text": "newest archived",
+                "reactions": [],
+                "files": [],
+                "thread": [],
+            },
+        ],
+    )
+    write_cursor(out_dir, "1705320900.000000")
+    # API only returns the older message on this dump pass.
+    mock_api.get_messages.return_value = [
+        {"ts": "1705320720.000000", "user": "U1", "text": "old", "reply_count": 0}
+    ]
+    mock_api.enrich.return_value = [
+        {
+            "ts": "1705320720.000000",
+            "user": "U1",
+            "user_name": "alice",
+            "text": "old",
+            "reactions": [],
+            "thread": [],
+        }
+    ]
+    run_dump(mock_api, "testteam", "C123", str(tmp_path))
+    assert (out_dir / ".cursor").read_text().strip() == "1705320900.000000"
+    data = json.loads((out_dir / "messages.json").read_text())
+    assert [m["ts"] for m in data] == ["1705320720.000000", "1705320900.000000"]
+
+
+def test_run_dump_thread_refreshes_channel_stats(tmp_path, mock_api):
+    """Thread dump that folds into messages.json must refresh derived channel sidecars."""
+    from ssd.output import channel_dir, write_messages
+
+    out_dir = channel_dir(str(tmp_path), "testteam", "general", "C123")
+    write_messages(
+        out_dir,
+        [
+            {
+                "ts": "1705320720.000000",
+                "user": "U1",
+                "user_name": "alice",
+                "text": "root",
+                "reactions": [],
+                "files": [],
+                "thread": [],
+            }
+        ],
+    )
+    mock_api.get_replies.return_value = [
+        {"ts": "1705320720.000000", "user": "U1", "text": "root"},
+        {"ts": "1705320721.000000", "user": "U2", "text": "reply"},
+    ]
+    mock_api.enrich_reply.side_effect = lambda r, channel_id=None, team=None: {
+        "ts": r["ts"],
+        "user": r["user"],
+        "user_name": "n",
+        "text": r["text"],
+        "reactions": [],
+        "files": [],
+    }
+    run_dump(
+        mock_api,
+        "testteam",
+        "https://testteam.slack.com/archives/C123/p1705320720000000",
+        str(tmp_path),
+    )
+    stats = json.loads((out_dir / "stats.json").read_text())
+    assert stats["messages"] == 1
+    assert stats["replies"] == 1
+    threads = json.loads((out_dir / "threads.json").read_text())
+    assert threads[0]["thread_ts"] == "1705320720.000000"
+    assert threads[0]["reply_count"] == 1
 
 
 def test_dump_refreshes_stale_workspace_sidecar(tmp_path, mock_api):
@@ -193,7 +317,7 @@ def test_run_dump_writes_sidecars(tmp_path, mock_api):
 
 
 def test_write_channel_stats_writes_reactions(tmp_path):
-    from ssd.dump import write_channel_stats
+    from ssd.sidecars import write_channel_stats
 
     out_dir = tmp_path / "acme" / "general_C123"
     out_dir.mkdir(parents=True)
@@ -241,6 +365,10 @@ def test_write_channel_stats_writes_reactions(tmp_path):
 def test_run_dump_resolves_channel_name(tmp_path, mock_api):
     run_dump(mock_api, "testteam", "#general", str(tmp_path))
     mock_api.resolve_channel.assert_called_once_with("general")
+    out_dir = tmp_path / "testteam" / "general_C123"
+    assert (out_dir / "messages.json").is_file()
+    data = json.loads((out_dir / "messages.json").read_text())
+    assert data[0]["ts"] == "1705320720.000000"
 
 
 def test_run_dump_thread_url(tmp_path, mock_api):
@@ -261,9 +389,16 @@ def test_run_dump_thread_url(tmp_path, mock_api):
         "https://testteam.slack.com/archives/C123/p1705320720000000",
         str(tmp_path),
     )
+    mock_api.get_messages.assert_not_called()
     mock_api.get_replies.assert_called_once()
-    mock_api.enrich_reply.assert_called_once_with(raw_reply, channel_id="C123")
+    mock_api.enrich_reply.assert_called_once_with(
+        raw_reply, channel_id="C123", team="testteam"
+    )
     assert mock_api.get_replies.call_args.kwargs.get("include_parent") is True
+    thread_json = next((tmp_path / "testteam").rglob("thread.json"))
+    rows = json.loads(thread_json.read_text())
+    assert [m["ts"] for m in rows] == ["1.1"]
+    assert rows[0]["user_name"] == "bob"
 
 
 def test_run_dump_thread_prefetches_users_before_enrich(tmp_path, mock_api):
@@ -273,7 +408,7 @@ def test_run_dump_thread_prefetches_users_before_enrich(tmp_path, mock_api):
     mock_api.get_replies.return_value = [
         {"ts": "1.1", "user": "U2", "text": "reply", "reactions": [], "files": []}
     ]
-    mock_api.enrich_reply.side_effect = lambda r, channel_id=None: (
+    mock_api.enrich_reply.side_effect = lambda r, channel_id=None, team=None: (
         order.append("enrich")
         or {
             "ts": r["ts"],
@@ -298,7 +433,7 @@ def test_run_dump_thread_writes_parent(tmp_path, mock_api):
         {"ts": "1.0", "user": "U1", "text": "root"},
         {"ts": "1.1", "user": "U2", "text": "reply"},
     ]
-    mock_api.enrich_reply.side_effect = lambda r, channel_id=None: {
+    mock_api.enrich_reply.side_effect = lambda r, channel_id=None, team=None: {
         "ts": r["ts"],
         "user": r["user"],
         "user_name": "n",
@@ -372,6 +507,18 @@ def test_dump_presence_merges_second_channel(tmp_path, mock_api):
     assert "U3" in presence
 
 
+def test_dump_presence_refreshes_on_workspace_refresh(tmp_path, mock_api):
+    """refresh_workspace=True must re-poll presence, not keep the first snapshot."""
+    mock_api.get_channel_members.return_value = ["U1"]
+    mock_api.get_presence.return_value = {"presence": "away", "online": False}
+    run_dump(mock_api, "testteam", "C123", str(tmp_path), refresh_workspace=True)
+    mock_api.get_presence.return_value = {"presence": "active", "online": True}
+    run_dump(mock_api, "testteam", "C123", str(tmp_path), refresh_workspace=True)
+    presence = json.loads((tmp_path / "testteam" / "presence.json").read_text())
+    assert presence["U1"]["presence"] == "active"
+    assert presence["U1"]["online"] is True
+
+
 def test_dump_presence_skips_failed_member(tmp_path, mock_api):
     mock_api.get_channel_members.return_value = ["U1", "Ubad"]
 
@@ -420,7 +567,7 @@ def test_dump_file_comments(tmp_path, mock_api):
 
 
 def test_write_channel_stats_reuses_file_comments(tmp_path):
-    from ssd.dump import write_channel_stats
+    from ssd.sidecars import write_channel_stats
 
     out_dir = tmp_path / "acme" / "general_C123"
     out_dir.mkdir(parents=True)

@@ -44,8 +44,8 @@ def test_resolve_channel_by_name_reuses_conversation_cache(mock_client):
         "response_metadata": {"next_cursor": ""},
     }
     api = SlackAPI("xoxd-fake", delay=0)
-    api.resolve_channel("random")
-    api.resolve_channel("#random")
+    assert api.resolve_channel("random") == ("C456", "random")
+    assert api.resolve_channel("#random") == ("C456", "random")
     assert mock_client.conversations_list.call_count == 1
 
 
@@ -403,6 +403,23 @@ def test_get_user_name_falls_back_to_real_name(mock_client):
     assert api.get_user_name("U002") == "Bob Jones"
 
 
+def test_get_user_name_failure_not_cached(mock_client):
+    """A failed users_info must not pin the raw id in the cache forever."""
+    mock_client.users_info.side_effect = [
+        RuntimeError("ratelimited"),
+        {
+            "user": {
+                "id": "U001",
+                "profile": {"display_name_normalized": "alice", "real_name": "Alice"},
+            }
+        },
+    ]
+    api = SlackAPI("xoxd-fake")
+    assert api.get_user_name("U001") == "U001"
+    assert api.get_user_name("U001") == "alice"
+    assert mock_client.users_info.call_count == 2
+
+
 def test_get_replies_excludes_root(mock_client):
     mock_client.conversations_replies.return_value = {
         "messages": [
@@ -487,7 +504,8 @@ def test_enrich_skips_users_info_after_workspace_list(mock_client):
     }
     api = SlackAPI("xoxd-fake", delay=0)
     api.fetch_workspace_users()
-    api.enrich("C123", [{"ts": "1.0", "user": "U1", "text": "hi", "reply_count": 0}])
+    enriched = api.enrich("C123", [{"ts": "1.0", "user": "U1", "text": "hi", "reply_count": 0}])
+    assert enriched[0]["user_name"] == "alice"
     mock_client.users_info.assert_not_called()
 
 
@@ -671,6 +689,7 @@ def test_enrich_preserves_subtype_bot_id_blocks_pinned(mock_client):
     assert result["bot_link"].endswith("/B99")
     assert result["icons"]["image_48"].endswith("/bot.png")
     assert result["file"]["id"] == "Fsolo"
+    assert any(f.get("id") == "Fsolo" for f in result["files"])
     assert result["language"] == "en"
     assert result["is_intro"] is True
     assert result["assistant_app_thread"]["title"] == "help"
@@ -747,6 +766,26 @@ def test_enrich_adds_permalink(mock_client):
         [{"ts": "1.2", "user": "U1", "text": "hi", "reply_count": 0, "reactions": [], "files": []}],
     )[0]
     assert result["permalink"] == "https://acme.slack.com/archives/C123/p12"
+
+
+def test_enrich_reply_omits_reactions_when_absent(mock_client):
+    mock_client.auth_test.return_value = {"team_domain": "acme"}
+    mock_client.users_info.return_value = {
+        "user": {"profile": {"display_name_normalized": "alice", "real_name": "Alice"}}
+    }
+    api = SlackAPI("xoxd-fake", delay=0)
+    without = api.enrich_reply({"ts": "1.0", "user": "U1", "text": "hi"}, channel_id="C123")
+    assert "reactions" not in without
+    with_rx = api.enrich_reply(
+        {
+            "ts": "1.0",
+            "user": "U1",
+            "text": "hi",
+            "reactions": [{"name": "thumbsup", "count": 1, "users": ["U1"]}],
+        },
+        channel_id="C123",
+    )
+    assert with_rx["reactions"] == [{"name": "thumbsup", "count": 1, "users": ["U1"]}]
 
 
 def test_get_workspace_raises_on_empty_domain(mock_client):
@@ -1045,28 +1084,23 @@ def test_get_billable_info_cached(mock_client):
     assert mock_client.team_billableInfo.call_count == 1
 
 
-def test_get_integration_logs_paginates(mock_client):
-    mock_client.team_integrationLogs.side_effect = [
-        {"logs": [{"service_id": "S1"}], "paging": {"pages": 2, "page": 1}},
-        {"logs": [{"service_id": "S2"}], "paging": {"pages": 2, "page": 2}},
+@pytest.mark.parametrize(
+    ("method", "api_attr", "page_key", "id_key", "ids"),
+    [
+        ("get_integration_logs", "team_integrationLogs", "logs", "service_id", ["S1", "S2"]),
+        ("get_access_logs", "team_accessLogs", "logins", "ip", ["1.1.1.1", "2.2.2.2"]),
+    ],
+)
+def test_team_logs_paginate(mock_client, method, api_attr, page_key, id_key, ids):
+    getattr(mock_client, api_attr).side_effect = [
+        {page_key: [{id_key: ids[0]}], "paging": {"pages": 2, "page": 1}},
+        {page_key: [{id_key: ids[1]}], "paging": {"pages": 2, "page": 2}},
     ]
     api = SlackAPI("xoxd-fake", delay=0)
-    logs = api.get_integration_logs()
-    assert [row["service_id"] for row in logs] == ["S1", "S2"]
-    api.get_integration_logs()
-    assert mock_client.team_integrationLogs.call_count == 2
-
-
-def test_get_access_logs_paginates(mock_client):
-    mock_client.team_accessLogs.side_effect = [
-        {"logins": [{"ip": "1.1.1.1"}], "paging": {"pages": 2, "page": 1}},
-        {"logins": [{"ip": "2.2.2.2"}], "paging": {"pages": 2, "page": 2}},
-    ]
-    api = SlackAPI("xoxd-fake", delay=0)
-    rows = api.get_access_logs()
-    assert [row["ip"] for row in rows] == ["1.1.1.1", "2.2.2.2"]
-    api.get_access_logs()
-    assert mock_client.team_accessLogs.call_count == 2
+    rows = getattr(api, method)()
+    assert [row[id_key] for row in rows] == ids
+    getattr(api, method)()
+    assert getattr(mock_client, api_attr).call_count == 2
 
 
 def _watch_stubs(mock_client) -> None:
@@ -1162,7 +1196,9 @@ def test_watch_messages_prefetches_users(mock_client, monkeypatch):
         [{"ts": "1.0", "user": "U1", "text": "hi", "reply_count": 0}]
     )
     api = SlackAPI("xoxd-fake", delay=0)
-    list(islice(api.watch_messages("C123", oldest="0", interval=0), 1))
+    got = list(islice(api.watch_messages("C123", oldest="0", interval=0), 1))
+    assert [m["text"] for m in got] == ["hi"]
+    assert got[0]["user_name"] == "alice"
     mock_client.users_list.assert_called()
     mock_client.users_info.assert_not_called()
 
@@ -1196,3 +1232,46 @@ def test_watch_messages_channel_does_not_fetch_replies(mock_client, monkeypatch)
     got = list(islice(api.watch_messages("C123", oldest="0", interval=0), 1))
     assert [m["text"] for m in got] == ["hi"]
     mock_client.conversations_replies.assert_not_called()
+
+
+def test_enrich_reply_normalizes_file_singular_into_files(mock_client):
+    mock_client.users_info.return_value = {
+        "user": {"profile": {"display_name_normalized": "alice"}}
+    }
+    api = SlackAPI("xoxd-fake", delay=0)
+    msg = {
+        "ts": "1.0",
+        "user": "U1",
+        "text": "see attached",
+        "subtype": "file_share",
+        "file": {
+            "id": "Fsolo",
+            "name": "report.pdf",
+            "url_private_download": "https://files.slack.com/report.pdf",
+        },
+    }
+    result = api.enrich_reply(msg, channel_id="C123")
+    assert result["file"]["id"] == "Fsolo"
+    assert any(f.get("id") == "Fsolo" for f in result["files"])
+
+
+def test_enrich_reply_file_singular_not_duplicated_when_also_in_files(mock_client):
+    mock_client.users_info.return_value = {"user": {"profile": {"display_name_normalized": "bob"}}}
+    api = SlackAPI("xoxd-fake", delay=0)
+    fobj = {"id": "F1", "name": "a.png"}
+    msg = {"ts": "1.0", "user": "U1", "text": "hi", "file": fobj, "files": [fobj]}
+    result = api.enrich_reply(msg)
+    assert sum(1 for f in result["files"] if f.get("id") == "F1") == 1
+
+
+def test_get_channel_members_cached(mock_client):
+    mock_client.conversations_members.return_value = {
+        "members": ["U1", "U2"],
+        "response_metadata": {"next_cursor": ""},
+    }
+    api = SlackAPI("xoxd-fake", delay=0)
+    first = api.get_channel_members("C123")
+    second = api.get_channel_members("C123")
+    assert first == ["U1", "U2"]
+    assert first is second
+    assert mock_client.conversations_members.call_count == 1

@@ -60,7 +60,7 @@ def test_extract_skips_empty_value(tmp_path, monkeypatch):
 def test_extract_raw_byte_scan(tmp_path, monkeypatch):
     """Raw byte scan finds token in .ldb file."""
     db = tmp_path / "Cookies"
-    db.touch()  # empty — no cookies table, sqlite will raise, caught internally
+    db.touch()  # empty: no cookies table, sqlite will raise, caught internally
 
     ldb_dir = tmp_path / "leveldb"
     ldb_dir.mkdir()
@@ -84,3 +84,53 @@ def test_extract_raises_when_nothing_found(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="Could not extract"):
         extract_token()
+
+
+def test_from_leveldb_returns_none_when_plyvel_missing(tmp_path, monkeypatch):
+    ldb_dir = tmp_path / "leveldb"
+    ldb_dir.mkdir()
+    monkeypatch.setattr(token_mod, "LEVELDB_PATH", ldb_dir)
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_plyvel(name: str, *args: object, **kwargs: object):
+        if name == "plyvel" or name.startswith("plyvel."):
+            raise ImportError("no plyvel")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_plyvel)
+    assert token_mod._from_leveldb() is None
+
+
+def test_chrome_d_cookie_returns_none_when_cryptography_missing(tmp_path, monkeypatch):
+    chrome_default = tmp_path / "Library/Application Support/Google/Chrome/Default"
+    chrome_default.mkdir(parents=True)
+    (chrome_default / "Cookies").touch()
+    monkeypatch.setattr(token_mod.Path, "home", lambda: tmp_path)
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_crypto(name: str, *args: object, **kwargs: object):
+        if name == "cryptography" or name.startswith("cryptography."):
+            raise ImportError("no cryptography")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_crypto)
+    assert token_mod._chrome_d_cookie() is None
+
+
+def test_missing_optional_extras_lists_absent_packages(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _block(name: str, *args: object, **kwargs: object):
+        if name in {"cryptography", "plyvel"} or name.startswith(("cryptography.", "plyvel.")):
+            raise ImportError("blocked")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _block)
+    assert token_mod.missing_optional_extras() == ["chrome", "leveldb"]

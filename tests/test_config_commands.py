@@ -15,7 +15,7 @@ def runner():
 def invoke(runner, *args, config_path, output_path):
     return runner.invoke(
         main,
-        ["--config", str(config_path), "--output", str(output_path)] + list(args),
+        ["--config", str(config_path), "--output", str(output_path), *args],
         catch_exceptions=False,
     )
 
@@ -70,6 +70,34 @@ def test_list_shows_channels(tmp_path, runner):
     assert "C123" in result.output
 
 
+def test_list_finds_dump_after_channel_rename(tmp_path, runner):
+    from ssd.config import add_channel, add_thread
+
+    out = tmp_path / "output"
+    ch = out / "acme" / "old-name_C123"
+    ch.mkdir(parents=True)
+    (ch / ".cursor").write_text("99.0", encoding="utf-8")
+    (ch / "messages.json").write_text("[]", encoding="utf-8")
+    td = ch / "thread_1_0"
+    td.mkdir()
+    (td / ".cursor").write_text("1.5", encoding="utf-8")
+    (td / "thread.json").write_text("[]", encoding="utf-8")
+    config = tmp_path / "ssd.toml"
+    add_channel(config, id="C123", name="new-name", url="https://...", since=None)
+    add_thread(
+        config,
+        channel_id="C123",
+        thread_ts="1.0",
+        url="https://x.slack.com/archives/C123/p1000000",
+    )
+    result = invoke(runner, "list", config_path=config, output_path=out)
+    assert result.exit_code == 0
+    assert "new-name" in result.output
+    assert "last=99.0" in result.output
+    assert "thread 1.0" in result.output
+    assert "last=1.5" in result.output
+
+
 def test_update_calls_sync_for_each_channel(tmp_path, runner):
     from ssd.config import add_channel
 
@@ -84,8 +112,10 @@ def test_update_calls_sync_for_each_channel(tmp_path, runner):
         mock_api = MagicMock()
         MockAPI.return_value = mock_api
         mock_api.get_workspace.return_value = "testteam"
-        invoke(runner, "update", config_path=config, output_path=tmp_path / "output")
+        result = invoke(runner, "update", config_path=config, output_path=tmp_path / "output")
+    assert result.exit_code == 0
     assert mock_sync.call_count == 2
+    assert {call.args[2] for call in mock_sync.call_args_list} == {"C123", "C456"}
 
 
 def test_add_thread_url_no_api_call(tmp_path, runner):

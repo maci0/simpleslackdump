@@ -1,20 +1,18 @@
+"""Build channel mention/reply graphs and render HTML from dumps."""
+
+import html
 import json
 import re
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from ssd.output import read_json
+from ssd.parser import ts_from_thread_dir
+
 _MENTION_RE = re.compile(r"@([A-Za-z0-9_.\-]+)")
 _USER_ID_RE = re.compile(r"<@([UW][A-Z0-9]+)>")
-
-
-def _ts_from_thread_dir(name: str) -> str | None:
-    if not name.startswith("thread_"):
-        return None
-    rest = name[len("thread_") :]
-    if "_" not in rest:
-        return None
-    return rest.replace("_", ".", 1)
 
 
 def _note_user(id_to_name: dict[str, str], msg: dict[str, Any]) -> str:
@@ -34,9 +32,10 @@ def build_graph(dirs: list[Path]) -> dict[str, Any]:
 
     Reads each messages.json once, buffering (sender, text, text_raw) for the
     mention scan which runs after all users are known. Standalone thread dumps
-    under thread_*/thread.json are also collected in the same pass, unless the
-    parent ts is already in that channel's messages.json. The parent in a
-    thread dump (ts matching the folder) counts as a message, not a reply.
+    under thread_*/thread.json are also collected in the same pass. When the
+    parent already lives in messages.json, only replies whose ts is not already
+    nested under that parent are counted (avoids double-counting while still
+    picking up replies that only exist in the thread dump).
     """
     edges: dict[tuple[str, str], int] = defaultdict(int)
     user_messages: dict[str, int] = defaultdict(int)
@@ -50,9 +49,17 @@ def build_graph(dirs: list[Path]) -> dict[str, Any]:
             continue
         msg_file = d / "messages.json"
         seen_ts: set[str] = set()
+        seen_reply_ts: set[str] = set()
+        parent_sender: dict[str, str] = {}
         if msg_file.exists():
+            try:
+                messages = read_json(msg_file)
+                if not isinstance(messages, list):
+                    raise ValueError(f"expected list, got {type(messages).__name__}")
+            except (OSError, ValueError) as exc:
+                print(f"  skip unreadable {msg_file}: {exc}", file=sys.stderr, flush=True)
+                messages = []
             channels.append(d.name)
-            messages = json.loads(msg_file.read_text())
             for msg in messages:
                 ts = str(msg.get("ts") or "")
                 if ts:
@@ -62,7 +69,12 @@ def build_graph(dirs: list[Path]) -> dict[str, Any]:
                     user_messages[sender] += 1
                     text, text_raw = _msg_blobs(msg)
                     msg_texts.append((sender, text, text_raw))
+                    if ts:
+                        parent_sender[ts] = sender
                 for reply in msg.get("thread", []):
+                    reply_ts = str(reply.get("ts") or "")
+                    if reply_ts:
+                        seen_reply_ts.add(reply_ts)
                     replier = _note_user(id_to_name, reply)
                     if replier == "unknown":
                         continue
@@ -73,18 +85,27 @@ def build_graph(dirs: list[Path]) -> dict[str, Any]:
                     msg_texts.append((replier, text, text_raw))
 
         # standalone thread dumps (thread_<ts>/thread.json)
-        for thread_dir in d.iterdir():
+        try:
+            thread_subdirs = list(d.iterdir())
+        except OSError as exc:
+            print(f"  skip unreadable {d}: {exc}", file=sys.stderr, flush=True)
+            thread_subdirs = []
+        for thread_dir in thread_subdirs:
             if not thread_dir.is_dir() or not thread_dir.name.startswith("thread_"):
                 continue
-            parent_ts = _ts_from_thread_dir(thread_dir.name)
-            if parent_ts and parent_ts in seen_ts:
-                continue
+            parent_ts = ts_from_thread_dir(thread_dir.name)
             tf = thread_dir / "thread.json"
             if not tf.exists():
                 continue
-            rows = json.loads(tf.read_text())
-            parent_name = None
-            if parent_ts:
+            try:
+                rows = read_json(tf)
+                if not isinstance(rows, list):
+                    raise ValueError(f"expected list, got {type(rows).__name__}")
+            except (OSError, ValueError) as exc:
+                print(f"  skip unreadable {tf}: {exc}", file=sys.stderr, flush=True)
+                rows = []
+            parent_name = parent_sender.get(parent_ts or "")
+            if parent_ts and parent_name is None:
                 for row in rows:
                     if str(row.get("ts") or "") != parent_ts:
                         continue
@@ -96,9 +117,14 @@ def build_graph(dirs: list[Path]) -> dict[str, Any]:
                 ts = str(row.get("ts") or "")
                 text, text_raw = _msg_blobs(row)
                 if parent_ts and ts == parent_ts:
+                    if parent_ts in seen_ts:
+                        continue
                     if name != "unknown":
                         user_messages[name] += 1
                         msg_texts.append((name, text, text_raw))
+                        parent_name = name
+                    continue
+                if ts and ts in seen_reply_ts:
                     continue
                 if name == "unknown":
                     continue
@@ -106,6 +132,8 @@ def build_graph(dirs: list[Path]) -> dict[str, Any]:
                 if parent_name and name != parent_name:
                     edges[(name, parent_name)] += 1
                 msg_texts.append((name, text, text_raw))
+                if ts:
+                    seen_reply_ts.add(ts)
 
     all_users = (frozenset(user_messages) | frozenset(user_replies)) - {"unknown"}
 
@@ -123,9 +151,9 @@ def build_graph(dirs: list[Path]) -> dict[str, Any]:
                         break
         if text_raw:
             for uid in _USER_ID_RE.findall(text_raw):
-                candidate = id_to_name.get(uid)
-                if candidate and candidate in all_users and candidate != sender:
-                    mentioned.add(candidate)
+                uid_name = id_to_name.get(uid)
+                if uid_name and uid_name in all_users and uid_name != sender:
+                    mentioned.add(uid_name)
         for candidate in mentioned:
             edges[(sender, candidate)] += 1
 
@@ -134,9 +162,9 @@ def build_graph(dirs: list[Path]) -> dict[str, Any]:
         for u in sorted(all_users)
     ]
     links = [
-        {"source": src, "target": dst, "value": count}
-        for (src, dst), count in edges.items()
-        if src in all_users and dst in all_users
+        {"source": source, "target": target, "value": count}
+        for (source, target), count in edges.items()
+        if source in all_users and target in all_users
     ]
     return {"nodes": nodes, "links": links, "channels": channels}
 
@@ -158,7 +186,11 @@ def render_html(graph: dict[str, Any], title: str = "Communication Graph") -> st
     data_json = (
         json.dumps(graph).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     )
-    channels_str = ", ".join(graph["channels"]) if graph["channels"] else "unknown"
+    # Directory names and titles are attacker-influenced when dumps are shared; escape for HTML.
+    channels_str = html.escape(
+        ", ".join(graph["channels"]) if graph["channels"] else "unknown", quote=True
+    )
+    safe_title = html.escape(title, quote=True)
     n_nodes = len(graph["nodes"])
     n_links = len(graph["links"])
 
@@ -166,7 +198,7 @@ def render_html(graph: dict[str, Any], title: str = "Communication Graph") -> st
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>{title}</title>
+<title>{safe_title}</title>
 <style>
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
 body {{ background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow: hidden; }}
