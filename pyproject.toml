@@ -15,7 +15,7 @@ dependencies = [
 [project.optional-dependencies]
 # Prefer: uv sync --locked --extra leveldb --extra chrome
 leveldb = ["plyvel>=1.5"]  # Slack Local Storage; raw .ldb scan works without it
-chrome = ["cryptography>=42.0"]  # decrypt Chrome's Slack d cookie on macOS
+chrome = ["cryptography>=50.0.0"]  # decrypt Chrome's Slack d cookie on macOS
 
 [project.urls]
 Homepage = "https://github.com/maci0/simpleslackdump"
